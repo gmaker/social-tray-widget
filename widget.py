@@ -43,7 +43,7 @@ _DELTA_UP   = "#4a9d5b"
 _DELTA_DOWN = "#f2645a"
 
 # The counters a row shows, in column order; also the keys in state.json.
-_METRICS = ("followers", "views", "likes")
+_METRICS = ("followers", "likes", "views")
 
 _FONT_CANDIDATES = [
     r"C:\Windows\Fonts\arialbd.ttf",
@@ -426,8 +426,8 @@ class SocialWidget:
                      font=("Segoe UI", 8)).grid(row=0, column=col, padx=(18, 0), sticky="e")
 
         head("FOLLOWERS", 1)
-        head("VIEWS", 2)
-        head("LIKES", 3)
+        head("LIKES", 2)
+        head("VIEWS", 3)
 
         self._popup_rows = {}
         r = 1
@@ -468,8 +468,8 @@ class SocialWidget:
 
     def _metric_inks(self):
         """Each counter and its column colour, in display order."""
-        return zip(_METRICS, (self.color_subs, self.color_views,
-                              self.color_likes))
+        return zip(_METRICS, (self.color_subs, self.color_likes,
+                              self.color_views))
 
     def _cell(self, parent, ink: str, row: int, column: int):
         """One value plus the delta that trails it, as a single grid cell."""
@@ -519,7 +519,9 @@ class SocialWidget:
                 except Exception:
                     log.exception("popup row update failed")
 
-        for metric, total in zip(_METRICS, self._totals()):
+        subs, views, likes = self._totals()
+        for metric, total in (("followers", subs), ("likes", likes),
+                              ("views", views)):
             cell = self._popup_totals.get(metric)
             if not cell:
                 continue
