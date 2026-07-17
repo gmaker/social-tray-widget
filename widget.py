@@ -45,6 +45,10 @@ _DELTA_DOWN = "#f2645a"
 # The counters a row shows, in column order; also the keys in state.json.
 _METRICS = ("followers", "likes", "views")
 
+# Column headers, keyed by metric. Followers is the anchor column and can never
+# be hidden; likes/views are toggled from the tray "Show" menu.
+_METRIC_LABELS = {"followers": "FOLLOWERS", "likes": "LIKES", "views": "VIEWS"}
+
 _FONT_CANDIDATES = [
     r"C:\Windows\Fonts\arialbd.ttf",
     r"C:\Windows\Fonts\ariblk.ttf",
@@ -185,6 +189,10 @@ class SocialWidget:
         self.sound_volume  = float(settings.get("sound_volume", 1.0))
         snd = str(settings.get("sound_followers", ""))
         self.sound_path = snd if os.path.isabs(snd) else os.path.normpath(os.path.join(PKG_DIR, snd))
+
+        # Which columns the popup renders. Followers is always in the set; likes
+        # and views are opt-in and remembered in settings.json.
+        self.visible = self._load_visible(settings)
 
         self._muted = False
         self._font  = self._load_font()
@@ -429,9 +437,8 @@ class SocialWidget:
             tk.Label(body, text=text, fg="#5a5a5a", bg="#141414",
                      font=("Segoe UI", 8)).grid(row=0, column=col, padx=(18, 0), sticky="e")
 
-        head("FOLLOWERS", 1)
-        head("LIKES", 2)
-        head("VIEWS", 3)
+        for i, metric in enumerate(self._visible_metrics(), start=1):
+            head(_METRIC_LABELS[metric], i)
 
         self._popup_rows = {}
         r = 1
@@ -451,7 +458,8 @@ class SocialWidget:
             r += 1
 
         tk.Frame(body, bg="#2a2a2a", height=1).grid(
-            row=r, column=0, columnspan=4, sticky="ew", pady=(7, 7))
+            row=r, column=0, columnspan=len(self._visible_metrics()) + 1,
+            sticky="ew", pady=(7, 7))
         r += 1
 
         tk.Label(body, text="TOTAL", fg="#cccccc", bg="#141414",
@@ -470,10 +478,22 @@ class SocialWidget:
         # on the window. Labels _FlipValue builds later carry their own binding.
         self._bind_reset(win)
 
+    def _load_visible(self, settings) -> set:
+        show = settings.get("show_columns")
+        vis = set(_METRICS) if show is None else {m for m in _METRICS if m in show}
+        vis.add("followers")   # the anchor column is never hidden
+        return vis
+
+    def _visible_metrics(self) -> list:
+        """Enabled counters in fixed display order (followers first)."""
+        return [m for m in _METRICS if m in self.visible]
+
     def _metric_inks(self):
-        """Each counter and its column colour, in display order."""
-        return zip(_METRICS, (self.color_subs, self.color_likes,
-                              self.color_views))
+        """Each visible counter and its column colour, in display order."""
+        colors = {"followers": self.color_subs,
+                  "likes":     self.color_likes,
+                  "views":     self.color_views}
+        return [(m, colors[m]) for m in self._visible_metrics()]
 
     def _cell(self, parent, ink: str, row: int, column: int):
         """One value plus the delta that trails it, as a single grid cell."""
@@ -545,6 +565,31 @@ class SocialWidget:
         label.configure(text=text, fg=colour)
 
     # ── menu ────────────────────────────────────────────────────────────────
+    def _rebuild_popup_if_open(self):
+        """Tear the popup down and build it fresh so it grows or shrinks to the
+        current column set. No-op when the popup isn't showing."""
+        if self._popup_win is None:
+            return
+        try:
+            self._popup_win.destroy()
+        except Exception:
+            pass
+        self._popup_win, self._popup_rows, self._popup_totals = None, {}, {}
+        self._build_popup()
+
+    def _make_col_toggle(self, metric: str):
+        def _t(icon, item):
+            if metric in self.visible:
+                self.visible.discard(metric)
+            else:
+                self.visible.add(metric)
+            self.settings["show_columns"] = self._visible_metrics()
+            save_settings(self.settings)
+            for t in self._trays():
+                t.update_menu()
+            self._post(self._rebuild_popup_if_open)
+        return _t
+
     def _make_toggle(self, p):
         def _t(icon, item):
             p.config["enabled"] = not p.config.get("enabled", False)
@@ -560,6 +605,20 @@ class SocialWidget:
                              checked=(lambda pr: lambda item: bool(pr.config.get("enabled")))(p))
             for p in self.providers
         ]
+
+        # Followers is the anchor column: always shown, greyed so it can't be
+        # unchecked. Likes/views toggle the popup's columns on and off.
+        show_items = []
+        for metric in _METRICS:
+            label = _METRIC_LABELS[metric].title()
+            if metric == "followers":
+                show_items.append(pystray.MenuItem(
+                    label, lambda i, it: None,
+                    checked=lambda item: True, enabled=False))
+            else:
+                show_items.append(pystray.MenuItem(
+                    label, self._make_col_toggle(metric),
+                    checked=(lambda m: lambda item: m in self.visible)(metric)))
 
         def on_mute(icon, _):
             self._muted = not self._muted
@@ -579,6 +638,7 @@ class SocialWidget:
             pystray.MenuItem("Details", lambda i, it: self._show_popup(),
                              default=True, visible=False),
             pystray.MenuItem("Platforms", pystray.Menu(*prov_items)),
+            pystray.MenuItem("Show", pystray.Menu(*show_items)),
             pystray.MenuItem(lambda _: "Sound: OFF" if self._muted else "Sound: ON",
                              on_mute, checked=lambda _: not self._muted),
             pystray.MenuItem("Refresh now", on_refresh),
