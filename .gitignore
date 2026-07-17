@@ -1,0 +1,13 @@
+# Live config — holds real client secrets and app secrets.
+# Publish settings.json.example instead.
+settings.json
+
+# OAuth tokens, one file per provider.
+tokens/
+
+# Local runtime state: the delta baselines, reset by clicking the popup.
+state.json
+
+__pycache__/
+*.pyc
+social_widget.log

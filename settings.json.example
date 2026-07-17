@@ -1,0 +1,35 @@
+{
+  "poll_interval": 60,
+  "sound_enabled": true,
+  "sound_volume": 1.0,
+  "sound_followers": "snd/2.wav",
+  "color_subs":  [57, 135, 229],
+  "color_views": [25, 158, 112],
+  "color_likes": [201, 133, 0],
+  "providers": {
+    "tiktok": {
+      "enabled": true,
+      "client_key": "YOUR_TIKTOK_CLIENT_KEY",
+      "client_secret": "YOUR_TIKTOK_CLIENT_SECRET",
+      "redirect_uri": "http://localhost:8080/callback",
+      "color": [23, 168, 164],
+      "count_views": true
+    },
+    "youtube": {
+      "enabled": false,
+      "client_id": "YOUR_GOOGLE_OAUTH_CLIENT_ID",
+      "client_secret": "YOUR_GOOGLE_OAUTH_CLIENT_SECRET",
+      "redirect_uri": "http://localhost:8080/callback",
+      "color": [255, 0, 0],
+      "count_likes": true,
+      "likes_refresh_min": 15
+    },
+    "instagram": {
+      "enabled": false,
+      "setup_token": "PASTE_A_DASHBOARD_TOKEN_HERE_ONCE",
+      "color": [164, 91, 214],
+      "count_views": true,
+      "views_refresh_min": 15
+    }
+  }
+}
