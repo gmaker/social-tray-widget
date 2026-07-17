@@ -52,7 +52,7 @@ _METRIC_LABELS = {"followers": "FLWRS", "likes": "LIKES", "views": "VIEWS"}
 # Value font: the same face, size and weight as the platform names / TOTAL, so
 # the numbers read as one typographic family with their row labels instead of a
 # second, larger typeface stacked beside them.
-_VALUE_FONT = ("Segoe UI", 10, "bold")
+_VALUE_FONT = ("Segoe UI", 12, "bold")
 
 _FONT_CANDIDATES = [
     r"C:\Windows\Fonts\arialbd.ttf",
