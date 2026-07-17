@@ -47,7 +47,12 @@ _METRICS = ("followers", "likes", "views")
 
 # Column headers, keyed by metric. Followers is the anchor column and can never
 # be hidden; likes/views are toggled from the tray "Show" menu.
-_METRIC_LABELS = {"followers": "FOLLOWERS", "likes": "LIKES", "views": "VIEWS"}
+_METRIC_LABELS = {"followers": "FLWRS", "likes": "LIKES", "views": "VIEWS"}
+
+# Value font: the same face, size and weight as the platform names / TOTAL, so
+# the numbers read as one typographic family with their row labels instead of a
+# second, larger typeface stacked beside them.
+_VALUE_FONT = ("Segoe UI", 10, "bold")
 
 _FONT_CANDIDATES = [
     r"C:\Windows\Fonts\arialbd.ttf",
@@ -135,7 +140,7 @@ class _FlipValue(tk.Frame):
             # independently; strip the default label padding/border or each one
             # sits in a few px of dead space and the number reads "1 9 0".
             lbl = tk.Label(self, text=ch, fg=self._color, bg=self._bg,
-                           font=("Segoe UI", 13, "bold"),
+                           font=_VALUE_FONT,
                            padx=0, pady=0, bd=0, highlightthickness=0)
             if self._on_click:
                 lbl.bind("<Button-1>", self._on_click)
@@ -434,11 +439,17 @@ class SocialWidget:
         body.pack(fill="both", expand=True)
 
         def head(text, col):
+            # Span the value+delta pair and centre over it. Left in the value
+            # column alone the header ("FOLLOWERS") would stretch that column far
+            # wider than the digits, stranding the numbers off at its right edge
+            # with a lake of empty space between them and the platform names.
             tk.Label(body, text=text, fg="#5a5a5a", bg="#141414",
-                     font=("Segoe UI", 8)).grid(row=0, column=col, padx=(18, 0), sticky="e")
+                     font=("Segoe UI", 8)).grid(row=0, column=col, columnspan=2,
+                                                padx=(18, 0))
 
-        for i, metric in enumerate(self._visible_metrics(), start=1):
-            head(_METRIC_LABELS[metric], i)
+        # Each metric spans two columns (value, delta); the header sits over both.
+        for i, metric in enumerate(self._visible_metrics()):
+            head(_METRIC_LABELS[metric], 1 + 2 * i)
 
         self._popup_rows = {}
         r = 1
@@ -452,21 +463,21 @@ class SocialWidget:
             # identity — painting its numbers too made three saturated hues
             # fight across every row.
             self._popup_rows[p.name] = {
-                metric: self._cell(body, _rgb(ink), r, i)
-                for i, (metric, ink) in enumerate(self._metric_inks(), start=1)
+                metric: self._cell(body, _rgb(ink), r, 1 + 2 * i)
+                for i, (metric, ink) in enumerate(self._metric_inks())
             }
             r += 1
 
         tk.Frame(body, bg="#2a2a2a", height=1).grid(
-            row=r, column=0, columnspan=len(self._visible_metrics()) + 1,
+            row=r, column=0, columnspan=1 + 2 * len(self._visible_metrics()),
             sticky="ew", pady=(7, 7))
         r += 1
 
         tk.Label(body, text="TOTAL", fg="#cccccc", bg="#141414",
                  font=("Segoe UI", 10, "bold"), anchor="w").grid(row=r, column=0, sticky="w")
         self._popup_totals = {
-            metric: self._cell(body, _rgb(ink), r, i)
-            for i, (metric, ink) in enumerate(self._metric_inks(), start=1)
+            metric: self._cell(body, _rgb(ink), r, 1 + 2 * i)
+            for i, (metric, ink) in enumerate(self._metric_inks())
         }
 
         self._popup_win = win
@@ -496,14 +507,16 @@ class SocialWidget:
         return [(m, colors[m]) for m in self._visible_metrics()]
 
     def _cell(self, parent, ink: str, row: int, column: int):
-        """One value plus the delta that trails it, as a single grid cell."""
-        wrap = tk.Frame(parent, bg="#141414")
-        wrap.grid(row=row, column=column, sticky="e", padx=(18, 0))
-        flip = _FlipValue(wrap, ink, on_click=self._reset_baselines)
-        flip.pack(side="left")
-        delta = tk.Label(wrap, text="", fg=_DELTA_UP, bg="#141414",
+        """One counter as two grid columns: the value (right-aligned) and the
+        delta chip beside it (left-aligned in the next column). Splitting them
+        keeps every number in a column sharing one right edge — a row with no
+        delta no longer shoves its number sideways to make room for a "(+12)"
+        that isn't there."""
+        flip = _FlipValue(parent, ink, on_click=self._reset_baselines)
+        flip.grid(row=row, column=column, sticky="e", padx=(18, 0))
+        delta = tk.Label(parent, text="", fg=_DELTA_UP, bg="#141414",
                          font=("Segoe UI", 8, "bold"))
-        delta.pack(side="left", padx=(4, 0))
+        delta.grid(row=row, column=column + 1, sticky="w", padx=(4, 0))
         return flip, delta
 
     def _bind_reset(self, widget):
