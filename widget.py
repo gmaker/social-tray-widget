@@ -127,8 +127,12 @@ class _FlipValue(tk.Frame):
             lbl.destroy()
         self._lbls = []
         for ch in text:
+            # Every digit is its own label so the split-flap can shuffle them
+            # independently; strip the default label padding/border or each one
+            # sits in a few px of dead space and the number reads "1 9 0".
             lbl = tk.Label(self, text=ch, fg=self._color, bg=self._bg,
-                           font=("Segoe UI", 13, "bold"))
+                           font=("Segoe UI", 13, "bold"),
+                           padx=0, pady=0, bd=0, highlightthickness=0)
             if self._on_click:
                 lbl.bind("<Button-1>", self._on_click)
             lbl.pack(side="left")
