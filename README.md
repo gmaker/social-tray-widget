@@ -1,17 +1,17 @@
 # Social Tray Widget
 
-A lightweight Windows system-tray widget that shows your **TikTok + YouTube + Instagram** followers, views, and likes side by side — right on the taskbar.
+A lightweight Windows system-tray widget that shows your **TikTok + YouTube + Instagram + Telegram** followers, views, and likes side by side — right on the taskbar.
 
 ![Screenshot](screenshots/screenshot.png)
 
-Every platform is read through its **official API over OAuth**. Nothing here scrapes a page or replays a private endpoint, so nothing here gets you rate-limited or banned.
+Every platform is read through its **official API** — OAuth for TikTok, YouTube and Instagram, an MTProto user session for Telegram. Nothing here scrapes a page or replays a private endpoint, so nothing here gets you rate-limited or banned.
 
 ---
 
 ## Features
 
 - Two tray icons: **Σ followers** · **Σ views** — click either for the detail popup
-- One table for all three platforms, plus totals: followers · views · likes
+- One table for all four platforms, plus totals: followers · views · likes
 - **Deltas**: green `(+12)` / red `(-3)` next to every value, counting from the last time you acknowledged them. Click the popup to rebase — the deltas survive restarts
 - Flip-digit animation in the popup (Solari board style)
 - Sound notification on new followers (configurable WAV, mutable from the tray)
@@ -65,6 +65,16 @@ The account must be **professional** (Business or Creator) and **public**.
 
 That's it — no app secret, no redirect URI, no browser flow. The dashboard token is already valid for 60 days; the widget adopts it on first run, moves it to `tokens/instagram.json`, blanks `setup_token`, and refreshes it from then on.
 
+### Telegram
+
+Bot API exposes neither post views nor reactions, so this provider signs in as **you** over MTProto and reads what the Telegram apps show.
+
+1. Get **api_id** and **api_hash** at [my.telegram.org](https://my.telegram.org/) → API development tools (Short name is strictly alphanumeric).
+2. Put them and the channel's `@username` into `providers.telegram` in `settings.json`. A private channel needs its numeric `-100…` id instead, and the signed-in account must be able to see it.
+3. Run `python telegram_login.py` in a real terminal and sign in with the phone number + the code Telegram sends (and the 2FA password, if set). This writes `tokens/telegram.session`; the widget itself never prompts. Any Python 3.10+ will do — the script re-launches itself inside the app's own `.venv`, creating it and installing the requirements on first use.
+
+> **The session file is a password.** `tokens/telegram.session` grants full access to the account — it lives in the gitignored `tokens/` folder; don't copy it anywhere. Revoking it (Telegram → Settings → Devices) just means running `telegram_login.py` once more.
+
 <details>
 <summary><b>Instagram troubleshooting</b> — three errors that look like something else</summary>
 
@@ -101,8 +111,11 @@ Per platform, under `providers.<name>`:
 | `client_id` / `client_secret` | youtube | — | From the Google OAuth client |
 | `redirect_uri` | tiktok, youtube | `http://localhost:8080/callback` | Must match the console exactly |
 | `setup_token` | instagram | — | Dashboard token; consumed on first run |
-| `count_views` | tiktok, instagram | `true` | Off = skip the views calls |
-| `views_refresh_min` | instagram | `15` | Minutes between views/likes passes |
+| `api_id` / `api_hash` | telegram | — | From my.telegram.org |
+| `channel` | telegram | — | `@username`, or `-100…` id for a private channel |
+| `proxy` | telegram | `""` | Empty = follow the Windows system proxy (for ISPs that block MTProto directly); `none` = force direct; or `socks5://host:port` |
+| `count_views` | tiktok, instagram, telegram | `true` | Off = skip the views calls |
+| `views_refresh_min` | instagram, telegram | `15` | Minutes between views/likes passes |
 | `count_likes` | youtube | `true` | Off = skip the uploads walk |
 | `likes_refresh_min` | youtube | `15` | Minutes between likes passes |
 
@@ -125,6 +138,7 @@ Followers cost one call per platform and stay live at `poll_interval`. Views and
 
 - **YouTube** has no channel-level like total, so likes mean walking the uploads playlist 50 videos at a time — `2 × ceil(uploads / 50)` units of the 10,000/day quota per pass. Beware that `statistics.videoCount` counts only *public* videos and understates this badly: a channel reporting 133 can hold 300+ items in its uploads playlist. Once a minute that alone would exhaust the quota; every 15 minutes it lands near a quarter of it.
 - **Instagram**'s limit is `4800 × impressions per 24h`, so a quiet account has a small budget. Views come from `/insights` (the documented `view_count` field on the media node is silently omitted by this product), batched 50 posts per call via `?ids=`. A pass costs 2 calls, not 50.
+- **Telegram** views and reactions mean walking the channel history, which Telethon paces at one 100-post request per second. The full walk is paid once at setup and then once a day; in between, a pass reads only posts newer than the last one seen — usually a single request.
 
 ## Colours
 
@@ -135,18 +149,18 @@ The palette is validated, not eyeballed: every colour sits inside the OKLCH ligh
 
 # Social Tray Widget (на русском)
 
-Лёгкий виджет для системного трея Windows: показывает **TikTok + YouTube + Instagram** — подписчиков, просмотры и лайки — рядом, прямо на панели задач.
+Лёгкий виджет для системного трея Windows: показывает **TikTok + YouTube + Instagram + Telegram** — подписчиков, просмотры и лайки — рядом, прямо на панели задач.
 
 ![Скриншот](screenshots/screenshot.png)
 
-Каждая платформа читается через **официальный API по OAuth**. Здесь нет скрейпинга страниц и обращений к приватным эндпоинтам, поэтому нет ни банов, ни блокировок по частоте.
+Каждая платформа читается через **официальный API** — OAuth у TikTok, YouTube и Instagram, пользовательская MTProto-сессия у Telegram. Здесь нет скрейпинга страниц и обращений к приватным эндпоинтам, поэтому нет ни банов, ни блокировок по частоте.
 
 ---
 
 ## Возможности
 
 - Две иконки в трее: **Σ подписчики** · **Σ просмотры** — клик открывает попап
-- Одна таблица на все три платформы плюс итоги: подписчики · просмотры · лайки
+- Одна таблица на все четыре платформы плюс итоги: подписчики · просмотры · лайки
 - **Дельты**: зелёное `(+12)` / красное `(-3)` рядом с каждым числом, считаются с момента последнего подтверждения. Клик по попапу перебазирует; дельты переживают перезапуск
 - Анимация цифр в стиле табло Solari
 - Звук при новых подписчиках (настраиваемый WAV, мьютится из трея)
@@ -200,6 +214,16 @@ YouTube округляет публичное число подписчиков 
 
 Всё — ни app secret, ни redirect URI, ни браузера. Токен из дашборда уже действует 60 дней: виджет принимает его при первом запуске, переносит в `tokens/instagram.json`, затирает `setup_token` и дальше продлевает сам.
 
+### Telegram
+
+Bot API не отдаёт ни просмотры постов, ни реакции, поэтому этот провайдер входит по MTProto **от вашего имени** и читает то же, что видят приложения Telegram.
+
+1. Получите **api_id** и **api_hash** на [my.telegram.org](https://my.telegram.org/) → API development tools (Short name — строго буквы и цифры).
+2. Впишите их и `@имя` канала в `providers.telegram` в `settings.json`. Приватному каналу нужен числовой id `-100…`, и аккаунт должен его видеть.
+3. Запустите `python telegram_login.py` в обычном терминале и войдите: номер телефона + код из Telegram (и пароль 2FA, если включён). Скрипт запишет `tokens/telegram.session`; сам виджет никогда ничего не спрашивает. Подойдёт любой Python 3.10+ — скрипт сам перезапустится в собственном окружении приложения (`.venv`), при первом использовании создав его и установив зависимости.
+
+> **Файл сессии — это пароль.** `tokens/telegram.session` даёт полный доступ к аккаунту — он лежит в игнорируемой git-ом папке `tokens/`; не копируйте его никуда. Если сессию отозвали (Telegram → Настройки → Устройства), просто запустите `telegram_login.py` ещё раз.
+
 <details>
 <summary><b>Instagram: разбор ошибок</b> — три штуки, которые означают не то, что написано</summary>
 
@@ -236,8 +260,11 @@ YouTube округляет публичное число подписчиков 
 | `client_id` / `client_secret` | youtube | — | Из OAuth-клиента Google |
 | `redirect_uri` | tiktok, youtube | `http://localhost:8080/callback` | Должен точно совпадать с консолью |
 | `setup_token` | instagram | — | Токен из дашборда, тратится при первом запуске |
-| `count_views` | tiktok, instagram | `true` | Выкл = не запрашивать просмотры |
-| `views_refresh_min` | instagram | `15` | Минуты между проходами за просмотрами/лайками |
+| `api_id` / `api_hash` | telegram | — | С my.telegram.org |
+| `channel` | telegram | — | `@имя`, либо id `-100…` для приватного канала |
+| `proxy` | telegram | `""` | Пусто = системный прокси Windows (если провайдер режет MTProto напрямую); `none` = принудительно напрямую; либо `socks5://host:port` |
+| `count_views` | tiktok, instagram, telegram | `true` | Выкл = не запрашивать просмотры |
+| `views_refresh_min` | instagram, telegram | `15` | Минуты между проходами за просмотрами/лайками |
 | `count_likes` | youtube | `true` | Выкл = не обходить плейлист загрузок |
 | `likes_refresh_min` | youtube | `15` | Минуты между проходами за лайками |
 
@@ -260,6 +287,7 @@ YouTube округляет публичное число подписчиков 
 
 - **У YouTube** нет суммы лайков на уровне канала, поэтому лайки — это обход плейлиста загрузок по 50 видео: `2 × ceil(загрузок / 50)` единиц квоты (10 000/сутки) за проход. Осторожно: `statistics.videoCount` считает только **публичные** видео и сильно занижает картину — канал, показывающий 133, легко держит 300+ элементов в плейлисте загрузок. Раз в минуту это выело бы всю квоту в одиночку; раз в 15 минут — около четверти.
 - **У Instagram** лимит `4800 × показы за 24 часа`, так что у тихого аккаунта бюджет маленький. Просмотры берутся из `/insights` (задокументированное поле `view_count` у media-ноды этот продукт молча не возвращает), пачками по 50 постов через `?ids=`. Проход стоит 2 запроса, а не 50.
+- **У Telegram** просмотры и реакции — это обход истории канала, который Telethon сам замедляет до одного запроса (100 постов) в секунду. Полный обход оплачивается один раз при настройке и затем раз в сутки; между ними проход читает только посты новее последнего увиденного — обычно один запрос.
 
 ## Цвета
 

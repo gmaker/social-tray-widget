@@ -1,3 +1,5 @@
 requests
 pillow
 pystray
+telethon
+python-socks[asyncio]
