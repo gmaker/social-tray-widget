@@ -456,7 +456,7 @@ class SocialWidget:
 
         self._popup_rows = {}
         r, prev_name = 1, ""
-        for p in self.providers:
+        for p in self._visible_providers():
             col = _rgb(p.color)
             tk.Label(body, text=p.label, fg=col, bg="#141414",
                      font=("Segoe UI", 10, "bold"), anchor="w").grid(
@@ -513,6 +513,12 @@ class SocialWidget:
     def _visible_metrics(self) -> list:
         """Enabled counters in fixed display order (followers first)."""
         return [m for m in _METRICS if m in self.visible]
+
+    def _visible_providers(self) -> list:
+        """Only platforms selected in the Platforms menu. An unselected platform
+        isn't polled and isn't drawn — the popup shrinks by that row instead of
+        parking a permanent dash where a disabled platform used to sit."""
+        return [p for p in self.providers if p.enabled]
 
     def _metric_inks(self):
         """Each visible counter and its column colour, in display order."""
@@ -624,6 +630,9 @@ class SocialWidget:
             save_settings(self.settings)
             for t in self._trays():
                 t.update_menu()
+            # Selecting/deselecting a platform adds or removes its row; refit the
+            # popup the same way a column toggle does.
+            self._post(self._rebuild_popup_if_open)
             threading.Thread(target=self._poll_once, daemon=True).start()
         return _t
 
