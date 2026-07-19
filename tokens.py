@@ -35,6 +35,11 @@ class TokenStore:
         except Exception:
             pass
 
+    def reload(self) -> None:
+        """Re-read from disk — for state another process writes (e.g. the
+        `signed_in` marker telegram_login.py stamps)."""
+        self._load()
+
     def _write(self) -> None:
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)

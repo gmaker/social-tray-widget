@@ -56,6 +56,18 @@ DEFAULTS: dict = {
             "count_views":       True,
             "views_refresh_min": 15,   # paging over media is the expensive call
         },
+        "telegram": {
+            "enabled":           False,
+            "api_id":            "",   # both from my.telegram.org ->
+            "api_hash":          "",   # API development tools
+            "channel":           "",   # @username of the channel
+            "proxy":             "",   # "" = system proxy if enabled;
+                                       # "none" = direct; or socks5://h:p
+            # Telegram's #229ED9 — from the brand, not the palette pipeline.
+            "color":             [34, 158, 217],
+            "count_views":       True,
+            "views_refresh_min": 15,   # the history walk is the expensive call
+        },
     },
 }
 

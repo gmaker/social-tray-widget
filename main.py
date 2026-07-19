@@ -11,6 +11,7 @@ import sys
 import threading
 
 from .providers.instagram import InstagramProvider
+from .providers.telegram import TelegramProvider
 from .providers.tiktok import TikTokProvider
 from .providers.youtube import YouTubeProvider
 from .settings import DIR, TOKEN_DIR, load_settings, save_settings
@@ -20,7 +21,8 @@ from .widget import SocialWidget
 _LOG_FILE = os.path.join(DIR, "social_widget.log")
 
 # Provider classes in the order they appear in the popup table.
-_PROVIDER_CLASSES = [TikTokProvider, YouTubeProvider, InstagramProvider]
+_PROVIDER_CLASSES = [TikTokProvider, YouTubeProvider, InstagramProvider,
+                     TelegramProvider]
 
 
 def _setup_logging():

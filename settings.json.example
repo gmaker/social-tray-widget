@@ -30,6 +30,16 @@
       "color": [164, 91, 214],
       "count_views": true,
       "views_refresh_min": 15
+    },
+    "telegram": {
+      "enabled": false,
+      "api_id": "",
+      "api_hash": "",
+      "channel": "@yourchannel",
+      "proxy": "",
+      "color": [34, 158, 217],
+      "count_views": true,
+      "views_refresh_min": 15
     }
   }
 }

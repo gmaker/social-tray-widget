@@ -11,3 +11,6 @@ state.json
 __pycache__/
 *.pyc
 social_widget.log
+
+# The app's own environment; telegram_login.py / start.bat create and use it.
+.venv/
