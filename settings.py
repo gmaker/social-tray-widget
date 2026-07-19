@@ -68,6 +68,23 @@ DEFAULTS: dict = {
             "count_views":       True,
             "views_refresh_min": 15,   # the history walk is the expensive call
         },
+        "vk": {
+            "enabled":           False,
+            "service_token":     "",   # service key of any VK ID app
+            "group":             "",   # community screen name or numeric id
+            "color":             [0, 119, 255],    # VK's brand blue
+            "count_views":       True,
+            "views_refresh_min": 15,   # the wall walk is the expensive call
+        },
+        "vkvideo": {
+            "enabled":           False,
+            "service_token":     "",   # may be the same key as providers.vk
+            "group":             "",   # the channel's backing community
+            # The violet end of VK Video's gradient; the blue end is VK's row.
+            "color":             [122, 133, 255],
+            "count_views":       True,
+            "views_refresh_min": 15,   # the video walk is the expensive call
+        },
     },
 }
 
