@@ -255,7 +255,10 @@ class SocialWidget:
         return img
 
     def _totals(self):
-        subs  = sum(m.followers for m in self.metrics.values() if m.ok)
+        # `followers` may be None for a deliberately follower-less row (see
+        # Metrics); skip those rather than crashing the sum.
+        subs  = sum(m.followers for m in self.metrics.values()
+                    if m.ok and m.followers is not None)
         views = sum(m.views     for m in self.metrics.values() if m.ok)
         # `likes` is optional per platform; sum whoever reports it, and stay None
         # when nobody does so the row shows a dash instead of a bogus zero.
@@ -452,7 +455,7 @@ class SocialWidget:
             head(_METRIC_LABELS[metric], 1 + 2 * i)
 
         self._popup_rows = {}
-        r = 1
+        r, prev_name = 1, ""
         for p in self.providers:
             col = _rgb(p.color)
             tk.Label(body, text=p.label, fg=col, bg="#141414",
@@ -462,11 +465,23 @@ class SocialWidget:
             # top to bottom, TOTAL included. The platform name is what carries
             # identity — painting its numbers too made three saturated hues
             # fight across every row.
-            self._popup_rows[p.name] = {
-                metric: self._cell(body, _rgb(ink), r, 1 + 2 * i)
-                for i, (metric, ink) in enumerate(self._metric_inks())
-            }
+            cells = {}
+            for i, (metric, ink) in enumerate(self._metric_inks()):
+                partner = (self._popup_rows.get(p.followers_span_with, {})
+                           .get("followers"))
+                if (metric == "followers" and partner
+                        and p.followers_span_with == prev_name):
+                    # A second row of the same community: instead of a dash,
+                    # stretch the partner's followers cell over this row too —
+                    # sticky e/w without n/s keeps it vertically centred.
+                    for w in partner:
+                        w.grid_configure(
+                            rowspan=int(w.grid_info().get("rowspan", 1)) + 1)
+                    continue
+                cells[metric] = self._cell(body, _rgb(ink), r, 1 + 2 * i)
+            self._popup_rows[p.name] = cells
             r += 1
+            prev_name = p.name
 
         tk.Frame(body, bg="#2a2a2a", height=1).grid(
             row=r, column=0, columnspan=1 + 2 * len(self._visible_metrics()),

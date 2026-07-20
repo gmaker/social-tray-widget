@@ -40,6 +40,22 @@
       "color": [34, 158, 217],
       "count_views": true,
       "views_refresh_min": 15
+    },
+    "vk": {
+      "enabled": false,
+      "service_token": "",
+      "group": "yourcommunity",
+      "color": [0, 119, 255],
+      "count_views": true,
+      "views_refresh_min": 15
+    },
+    "vkvideo": {
+      "enabled": false,
+      "service_token": "",
+      "group": "yourcommunity",
+      "color": [122, 133, 255],
+      "count_views": true,
+      "views_refresh_min": 15
     }
   }
 }

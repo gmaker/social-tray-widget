@@ -23,8 +23,12 @@ class Metrics:
     `ok` is False when the value could not be refreshed (disabled, not
     authorised, network/API error); the widget then shows a dash and keeps the
     platform out of the totals.
+
+    `followers` may be None for a row that deliberately reports no follower
+    count (e.g. a second row of the same community, which would otherwise be
+    counted twice in the tray total); the widget shows a dash.
     """
-    followers: int = 0
+    followers: Optional[int] = 0
     views: int = 0
     likes: Optional[int] = None
     ok: bool = True
@@ -35,6 +39,12 @@ class Provider(ABC):
     name: str = ""           # stable id: token file name, settings key
     label: str = ""          # shown in the tray menu / popup
     default_color = (200, 200, 200)
+
+    # Name of the provider whose followers cell this row shares — for a second
+    # row of the same community (its Metrics.followers stays None so the tray
+    # total counts the members once). The popup stretches the partner's cell
+    # over both rows when they are adjacent.
+    followers_span_with: str = ""
 
     def __init__(self, config: dict, tokens, on_config_change=None):
         # `config` is a live reference into settings["providers"][name]; mutating
