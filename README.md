@@ -17,7 +17,7 @@ Every platform is read through its **official API** — OAuth for TikTok, YouTub
 - Sound notification on new followers (configurable WAV, mutable from the tray)
 - Enable/disable any platform from the tray menu
 - Tokens refresh themselves — after setup you never touch a developer console again
-- One provider class per platform: adding a fourth is one file plus one line
+- One provider class per platform: adding the next one is one file plus one line
 
 ---
 
@@ -197,7 +197,7 @@ The palette is validated, not eyeballed: every colour sits inside the OKLCH ligh
 - Звук при новых подписчиках (настраиваемый WAV, мьютится из трея)
 - Включение/выключение любой платформы из меню трея
 - Токены обновляются сами — после настройки в консоль разработчика больше не возвращаешься
-- Один класс на платформу: добавить четвёртую — это один файл и одна строка
+- Один класс на платформу: добавить следующую — это один файл и одна строка
 
 ---
 
