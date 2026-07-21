@@ -22,16 +22,16 @@ Metrics:
   * views     -> `views` summed over every channel post
   * likes     -> reaction counts summed over every channel post
 
-The history walk is the expensive part — Telethon paces an unbounded walk at
-one 100-post request per second, so a full pass costs ~N/100 seconds and runs
-inside the widget's poll lock. It is therefore paid rarely: the first pass
-walks everything, after that only posts newer than `walk_max_id` are read
-(usually a single request), and once a day a full pass runs again to pick up
-view growth on old posts and deletions, which the incremental pass freezes.
-Totals are cached for `views_refresh_min` minutes between passes; followers
-stay live at `poll_interval`. On a FloodWaitError longer than the auto-sleep
-threshold the last known numbers are reused rather than blocking the poll
-thread for minutes — or a dash, if no pass ever finished.
+The history walk is the expensive part, so it is bounded two ways. The recent
+tail — the last `_TAIL_IDS` message ids — is re-read in full on every pass, so
+a fresh post's views stay live while they climb (they accrue mostly in the
+first days). Everything older is summed once into a frozen total and not read
+again, capping the walk at ~the tail length however long the channel's history
+grows. Once a day the frozen part is recomputed from scratch to absorb
+deletions and any late growth on it. Totals are cached for `views_refresh_min`
+minutes between passes; followers stay live at `poll_interval`. On a
+FloodWaitError longer than the auto-sleep threshold the last known numbers are
+reused rather than blocking the poll thread — or a dash, if no pass finished.
 
 A fresh client and event loop are opened inside every poll rather than kept
 alive: polls can come from two different threads (the supervisor loop and the
@@ -72,7 +72,10 @@ logging.getLogger("telethon").setLevel(logging.WARNING)
 
 _LOGIN_HINT = "run `python telegram_login.py` in a terminal to sign in"
 
-_FULL_WALK_EVERY = 24 * 3600   # drift correction: full re-walk cadence
+_FULL_WALK_EVERY = 24 * 3600   # drift correction: full re-baseline cadence
+_TAIL_IDS        = 500         # trailing message ids kept live (re-read each
+                               # pass); older posts freeze — their views have
+                               # long since settled
 
 
 class TelegramProvider(Provider):
@@ -188,10 +191,12 @@ class TelegramProvider(Provider):
         """(views, likes) across every post, re-read at most every
         `views_refresh_min` minutes and cached in the token file between runs.
 
-        Incremental: after the first full walk only posts above `walk_max_id`
-        are fetched — one request for a quiet channel instead of N/100 seconds
-        under the poll lock. That freezes old posts' numbers, so once a day the
-        walk starts from zero again and the totals true up.
+        The recent tail (the last `_TAIL_IDS` message ids) is re-read in full
+        on every pass, so a fresh post's views stay live while they climb.
+        Older posts, whose counts have long since settled, are summed once into
+        a frozen total and not read again — capping the walk at ~the tail
+        length no matter how long the history is. Once a day the frozen part is
+        recomputed from scratch to absorb deletions and late growth on it.
         """
         from telethon.errors import FloodWaitError
 
@@ -205,30 +210,73 @@ class TelegramProvider(Provider):
         every  = int(self.config.get("views_refresh_min", 15)) * 60
         if walked and time.time() < extra.get("totals_at", 0) + every:
             return cached
-        full = (not walked
-                or time.time() > extra.get("full_walk_at", 0) + _FULL_WALK_EVERY)
-        since        = 0 if full else int(extra.get("walk_max_id", 0))
-        views, likes = (0, 0) if full else cached
-        max_id       = since
+
+        floor    = int(extra.get("frozen_below", 0))
+        frozen_v = int(extra.get("frozen_views", 0))
+        frozen_l = int(extra.get("frozen_likes", 0))
+        # Re-read everything on the first pass and once a day, so deletions and
+        # any late growth on now-frozen posts are absorbed.
+        rebaseline = (not walked
+                      or time.time() > extra.get("frozen_at", 0) + _FULL_WALK_EVERY)
+        if rebaseline:
+            floor = frozen_v = frozen_l = 0
+
+        new_floor = floor
+        tail_v = tail_l = add_v = add_l = 0
+        first  = True
         try:
-            async for msg in client.iter_messages(self._entity(), min_id=since):
-                views += int(getattr(msg, "views", None) or 0)
+            # wait_time=0 keeps the bounded live tail snappy under the poll
+            # lock; the daily rebaseline is an unbounded re-walk (floor=0), so
+            # leave Telethon's default 1s/100-post pacing on it to stay
+            # flood-safe. Floods are also caught below.
+            async for msg in client.iter_messages(
+                    self._entity(), min_id=floor,
+                    wait_time=0 if not rebaseline else None):
+                if first:                 # newest first — this is the top id
+                    new_floor = max(floor, msg.id - _TAIL_IDS)
+                    first = False
+                v = int(getattr(msg, "views", None) or 0)
                 reactions = getattr(msg, "reactions", None)
-                if reactions and reactions.results:
-                    likes += sum(int(r.count) for r in reactions.results)
-                if msg.id > max_id:
-                    max_id = msg.id
+                l = (sum(int(r.count) for r in reactions.results)
+                     if reactions and reactions.results else 0)
+                if msg.id <= new_floor:   # slid out of the live tail → freeze
+                    add_v += v
+                    add_l += l
+                else:
+                    tail_v += v
+                    tail_l += l
         except FloodWaitError as exc:
-            # These are the secondary numbers; don't lose the follower count
-            # over them. walk_max_id stays put, so the next pass safely
-            # re-walks the same span.
             log.warning("telegram: flood wait %ss during history walk, "
                         "reusing cached totals", exc.seconds)
+            if not walked:
+                raise                      # no cache yet → dash, not a solid 0
+            if rebaseline:                 # an aborted re-walk backs off a day
+                self.tokens.set_extra("frozen_at", time.time())
             return cached
-        self.tokens.set_extra("views_total", views)
-        self.tokens.set_extra("likes_total", likes)
-        self.tokens.set_extra("totals_at", time.time())
-        self.tokens.set_extra("walk_max_id", max_id)
-        if full:
-            self.tokens.set_extra("full_walk_at", time.time())
+        except Exception as exc:
+            # Any other transient walk failure (connection reset, RPC/server
+            # error, timeout) is just as secondary as a flood — don't blank the
+            # follower count over it either.
+            log.warning("telegram: history walk failed (%s), "
+                        "reusing cached totals", exc)
+            if not walked:
+                raise
+            if rebaseline:
+                self.tokens.set_extra("frozen_at", time.time())
+            return cached
+
+        frozen_v += add_v
+        frozen_l += add_l
+        views = frozen_v + tail_v
+        likes = frozen_l + tail_l
+        # One write: the id boundary and its sums must never be observed apart
+        # on disk (a crash between separate writes would silently under- or
+        # over-count until the next daily rebaseline).
+        persist = {"frozen_below": new_floor,
+                   "frozen_views": frozen_v, "frozen_likes": frozen_l,
+                   "views_total":  views,    "likes_total":  likes,
+                   "totals_at":    time.time()}
+        if rebaseline:
+            persist["frozen_at"] = time.time()
+        self.tokens.update_extra(persist)
         return views, likes
