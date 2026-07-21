@@ -8,7 +8,10 @@ counted by the wall row.
   * VKProvider       followers = community members (groups.getById, exact)
                      likes / views = summed over wall posts (wall.get)
   * VKVideoProvider  followers = None (same community — never counted twice)
-                     likes / views = summed over videos (video.get)
+                     likes / views = summed over the long videos (video.get)
+  * VKClipsProvider  followers = None (same community again)
+                     likes / views = summed over the community's clips, which
+                     the public API exposes only by explicit id (see below)
 
 Auth is a *service key* from any VK ID app (dev.vk.com -> Приложения ->
 Создать приложение; the key is in the app's settings). No OAuth, no expiry,
@@ -32,11 +35,20 @@ costs one groups.getById. The historical (now undocumented) wall.get quota
 of ~5000 calls/day starts to matter only past several thousand posts at the
 default cadence.
 
-Old posts (pre-2017) may lack the views counter — counted as 0. Clips are
-not returned by video.get and are not counted.
+Old posts (pre-2017) may lack the views counter — counted as 0.
 
-Config (settings.json -> providers.vk / providers.vkvideo):
-    "service_token":     the service key; the same one can serve both rows
+Clips (short vertical videos) are NOT in video.get's owner listing and have no
+list method in the public API at all. But they share the id sequence of the
+community's long videos, and video.get videos=<explicit ids> returns them as
+type=short_video with real views and likes — as long as the id list is pure:
+one regular-video id mixed in silently zeroes every clip in the response
+(undocumented, verified 2026-07-22). VKClipsProvider therefore discovers clip
+ids by scanning the video-id neighbourhood for type=short_video, caches them,
+and reads their stats in a clips-only batch. It needs at least one regular
+video to anchor the id space; a clip-only community can't be bootstrapped.
+
+Config (settings.json -> providers.vk / providers.vkvideo / providers.vkclips):
+    "service_token":     the service key; the same one can serve all rows
     "group":             community screen name or numeric id (no minus)
     "count_views":       default true; false skips the walk, likes go dash
     "views_refresh_min": default 15
@@ -63,6 +75,19 @@ _THROTTLE_CODES = {6, 9, 29}
 
 # resolveScreenName types that negate into a community owner_id.
 _COMMUNITY_TYPES = ("group", "page", "event")
+
+# Clip discovery/stat tuning (VKClipsProvider).
+_CLIP_CHUNK  = 50    # ids consumed per video.get videos= call (the API cap)
+_SCAN_MARGIN = 60    # start the id scan this far below the earliest known id
+_SCAN_STOP   = 3     # consecutive empty windows that mean "past the last id"
+_SCAN_CAP    = 60    # windows hard-cap, a backstop against a runaway scan
+
+
+def _is_stub(o: dict) -> bool:
+    """A clip returned in a purity-violated response comes back present but
+    zeroed (views 0 AND date 0). A genuinely new clip with no views yet still
+    carries a real date, so it is not mistaken for a stub."""
+    return int(o.get("views") or 0) == 0 and int(o.get("date") or 0) == 0
 
 
 class VKError(Exception):
@@ -105,7 +130,7 @@ class _VKBase(Provider):
         cached keyed by the name, so re-pointing `group` re-resolves."""
         g = self._group()
         if g.isdigit():
-            return g
+            return self._track_group(g)
         extra = self.tokens.extra
         if extra.get("group_id") and extra.get("group_id_for") == g:
             return str(extra["group_id"])
@@ -118,11 +143,22 @@ class _VKBase(Provider):
             # A user's screen name resolves too; -<user id> would address an
             # unrelated community that happens to share the number.
             raise VKError(0, f"{g!r} is a {kind or '?'}, not a community")
-        # The group changed — the cached totals belong to the old one; drop
-        # the timestamp so the next _totals() call re-walks immediately.
-        extra.pop("totals_at", None)
-        self.tokens.set_extra("group_id", gid)
         self.tokens.set_extra("group_id_for", g)
+        return self._track_group(gid)
+
+    def _track_group(self, gid: str) -> str:
+        """Record the resolved community id and, when it CHANGES (a re-point,
+        numeric or screen-name), drop the previous community's cached totals
+        and clip ids — otherwise a re-pointed row would serve the old
+        community's numbers (or, for clips, mix its id slots into the new
+        community). The numeric path used to skip this entirely."""
+        extra = self.tokens.extra
+        prev  = str(extra.get("group_id") or "")
+        if prev and prev != gid:
+            for k in ("totals_at", "views_total", "likes_total", "clip_ids"):
+                extra.pop(k, None)
+        if prev != gid:
+            self.tokens.set_extra("group_id", gid)
         return gid
 
     def _members(self) -> int:
@@ -149,17 +185,8 @@ class _VKBase(Provider):
         every  = int(self.config.get("views_refresh_min", 15)) * 60
         if walked and time.time() < extra.get("totals_at", 0) + every:
             return cached
-        views = likes = offset = 0
-        total = None                  # real bound learned from the first page
         try:
-            while total is None or offset < total:
-                items, total = self._walk_page(offset)
-                for v, l in items:
-                    views += v
-                    likes += l
-                # Hidden items make pages short or even empty — the response's
-                # total count is the bound, not the page contents.
-                offset += _PER_PAGE
+            views, likes = self._compute_totals()
         except VKError as exc:
             if exc.code not in _THROTTLE_CODES:
                 raise
@@ -177,6 +204,22 @@ class _VKBase(Provider):
         self.tokens.set_extra("views_total", views)
         self.tokens.set_extra("likes_total", likes)
         self.tokens.set_extra("totals_at", time.time())
+        return views, likes
+
+    def _compute_totals(self) -> tuple:
+        """Sum (views, likes). Default: page the owner's items through
+        `_walk_page`; overridden where the totals come from an explicit id list
+        (clips have no list method)."""
+        views = likes = offset = 0
+        total = None                  # real bound learned from the first page
+        while total is None or offset < total:
+            items, total = self._walk_page(offset)
+            for v, l in items:
+                views += v
+                likes += l
+            # Hidden items make pages short or even empty — the response's
+            # total count is the bound, not the page contents.
+            offset += _PER_PAGE
         return views, likes
 
     def _walk_page(self, offset: int) -> tuple:
@@ -228,3 +271,118 @@ class VKVideoProvider(_VKBase):
                   (v.get("likes") or {}).get("count", 0))
                  for v in resp.get("items", [])],
                 int(resp.get("count", 0)))
+
+
+class VKClipsProvider(_VKBase):
+    name          = "vkclips"
+    label         = "VK Clips"
+    # VK Clips' magenta — from the brand, not the palette pipeline; distinct
+    # from VK's blue and VK Video's periwinkle so the three VK rows read apart.
+    default_color = (230, 100, 160)
+    # Same community as VK / VK Video — members counted once (spanned cell).
+    followers_span_with = "vk"
+    # The user can fold this row into VK Video from the tray menu.
+    merge_into          = "vkvideo"
+
+    def fetch(self) -> Metrics:
+        self._group_id()   # re-resolves (and drops stale totals) on a re-point
+        views, likes = self._totals()
+        return Metrics(followers=None, views=views, likes=likes)
+
+    def _compute_totals(self) -> tuple:
+        owner  = f"-{self._group_id()}"
+        target = self._clips_count()
+        ids    = [int(i) for i in (self.tokens.extra.get("clip_ids") or [])]
+        views, likes, live = self._clip_stats(owner, ids)
+        if len(live) < target:
+            # A new clip — or one that was transiently absent last pass.
+            # Rescan for more ids and re-stat the UNION of the cache and the
+            # scan: the scan can only ADD clips it reaches, never drop a
+            # cache-live clip it happened not to cover. Genuinely deleted ids
+            # still prune — _clip_stats omits anything that comes back absent.
+            found = self._scan_clips(owner, target)
+            if found:
+                views, likes, live = self._clip_stats(
+                    owner, sorted(set(ids) | found))
+        self.tokens.set_extra("clip_ids", sorted(live))
+        return views, likes
+
+    def _clips_count(self) -> int:
+        resp = _call(self._token(), "groups.getById",
+                     group_id=self._group_id(), fields="clips_count")
+        g = (resp.get("groups") or [{}])[0]
+        if "clips_count" not in g:
+            # Mirror _members: a hidden count (closed/restricted community) must
+            # not read as a real 0 and poison the baseline.
+            raise VKError(15, "clips_count hidden (closed community?)")
+        return int(g["clips_count"])
+
+    def _clip_stats(self, owner: str, ids: list) -> tuple:
+        """Sum (views, likes) over a PURE clip-id list and return the set of ids
+        that came back as real objects. Deleted/unknown ids are simply absent;
+        never mix a regular-video id in here — it zeroes every clip."""
+        views = likes = 0
+        live  = set()
+        for i in range(0, len(ids), _CLIP_CHUNK):
+            videos = ",".join(f"{owner}_{c}" for c in ids[i:i + _CLIP_CHUNK])
+            resp = _call(self._token(), "video.get", videos=videos)
+            for o in resp.get("items", []):
+                if _is_stub(o):        # only if purity was violated — skip it
+                    continue
+                live.add(int(o["id"]))
+                views += int(o.get("views") or 0)
+                likes += int((o.get("likes") or {}).get("count", 0))
+        return views, likes, live
+
+    def _scan_clips(self, owner: str, target: int) -> set:
+        """Find clip ids by scanning the community's video-id neighbourhood for
+        type=short_video. Two parts: every 50-id window that already holds a
+        known id (so a wide, gappy id space costs one call per populated
+        window, not per void — and clips interspersed among the long videos are
+        covered wherever they sit), then a walk UPWARD past the highest known
+        id, where new clips land. Empty when there is no anchor (a clip-only
+        community)."""
+        anchor = (self._video_ids(owner)
+                  + [int(i) for i in (self.tokens.extra.get("clip_ids") or [])])
+        if not anchor:
+            log.warning("vkclips: no regular video to locate the clip id space")
+            return set()
+        lo, hi = min(anchor), max(anchor)
+        starts = {(a // _CLIP_CHUNK) * _CLIP_CHUNK for a in anchor}
+        starts.add(((lo - _SCAN_MARGIN) // _CLIP_CHUNK) * _CLIP_CHUNK)
+        found = set()
+        for s in sorted(starts):
+            found |= self._clips_in_window(owner, s)[0]
+            if target and len(found) >= target:
+                return found
+        # New clips get the highest ids: walk on past the top until the id
+        # space runs out (empty windows) or the backstop trips.
+        cur = (hi // _CLIP_CHUNK + 1) * _CLIP_CHUNK
+        empty = windows = 0
+        while empty < _SCAN_STOP and windows < _SCAN_CAP:
+            clips, n = self._clips_in_window(owner, cur)
+            found |= clips
+            empty   = empty + 1 if n == 0 else 0
+            cur    += _CLIP_CHUNK
+            windows += 1
+            if target and len(found) >= target:
+                break
+        return found
+
+    def _clips_in_window(self, owner: str, start: int) -> tuple:
+        """(clip ids, item count) for the 50-id window at `start`."""
+        block = ",".join(f"{owner}_{start + k}" for k in range(_CLIP_CHUNK))
+        items = _call(self._token(), "video.get", videos=block).get("items", [])
+        clips = {int(o["id"]) for o in items if o.get("type") == "short_video"}
+        return clips, len(items)
+
+    def _video_ids(self, owner: str) -> list:
+        """Ids of the community's regular (long) videos — the scan anchor."""
+        ids, offset, total = [], 0, None
+        while total is None or offset < total:
+            resp = _call(self._token(), "video.get",
+                         owner_id=owner, count=_PER_PAGE, offset=offset)
+            ids += [int(v["id"]) for v in resp.get("items", []) if v.get("id")]
+            total = int(resp.get("count", 0))
+            offset += _PER_PAGE
+        return ids

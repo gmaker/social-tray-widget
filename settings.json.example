@@ -6,6 +6,7 @@
   "color_subs":  [57, 135, 229],
   "color_views": [25, 158, 112],
   "color_likes": [201, 133, 0],
+  "merge_vkvideo_clips": false,
   "providers": {
     "tiktok": {
       "enabled": true,
@@ -54,6 +55,14 @@
       "service_token": "",
       "group": "yourcommunity",
       "color": [122, 133, 255],
+      "count_views": true,
+      "views_refresh_min": 15
+    },
+    "vkclips": {
+      "enabled": false,
+      "service_token": "",
+      "group": "yourcommunity",
+      "color": [230, 100, 160],
       "count_views": true,
       "views_refresh_min": 15
     }

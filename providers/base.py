@@ -40,11 +40,17 @@ class Provider(ABC):
     label: str = ""          # shown in the tray menu / popup
     default_color = (200, 200, 200)
 
-    # Name of the provider whose followers cell this row shares — for a second
+    # Name of the provider whose followers cell this row shares — for another
     # row of the same community (its Metrics.followers stays None so the tray
     # total counts the members once). The popup stretches the partner's cell
-    # over both rows when they are adjacent.
+    # over the whole contiguous run of sharing rows.
     followers_span_with: str = ""
+
+    # Name of the provider this row can be folded into for display — e.g. VK
+    # Clips into VK Video. When the user turns the merge on, this row is not
+    # drawn and its numbers are added to the target row's. Totals are unchanged
+    # either way (both rows are always polled and always counted).
+    merge_into: str = ""
 
     def __init__(self, config: dict, tokens, on_config_change=None):
         # `config` is a live reference into settings["providers"][name]; mutating
