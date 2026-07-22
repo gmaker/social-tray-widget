@@ -455,7 +455,10 @@ class SocialWidget:
             head(_METRIC_LABELS[metric], 1 + 2 * i)
 
         self._popup_rows = {}
-        r, prev_name = 1, ""
+        # `anchor` is the last row that drew its OWN followers cell; a run of
+        # same-community rows (VK, VK Video, VK Clips) rides that one cell,
+        # centred over the whole run.
+        r, anchor = 1, ""
         for p in self._visible_providers():
             col = _rgb(p.color)
             tk.Label(body, text=p.label, fg=col, bg="#141414",
@@ -467,21 +470,22 @@ class SocialWidget:
             # fight across every row.
             cells = {}
             for i, (metric, ink) in enumerate(self._metric_inks()):
-                partner = (self._popup_rows.get(p.followers_span_with, {})
-                           .get("followers"))
-                if (metric == "followers" and partner
-                        and p.followers_span_with == prev_name):
-                    # A second row of the same community: instead of a dash,
-                    # stretch the partner's followers cell over this row too —
-                    # sticky e/w without n/s keeps it vertically centred.
-                    for w in partner:
-                        w.grid_configure(
-                            rowspan=int(w.grid_info().get("rowspan", 1)) + 1)
-                    continue
+                if metric == "followers":
+                    partner = (self._popup_rows.get(p.followers_span_with, {})
+                               .get("followers"))
+                    if partner and p.followers_span_with == anchor:
+                        # Same community as the row above: instead of a dash,
+                        # stretch the partner's cell down over this row too —
+                        # sticky e/w without n/s keeps it vertically centred.
+                        for w in partner:
+                            w.grid_configure(
+                                rowspan=int(w.grid_info().get("rowspan", 1)) + 1)
+                        continue
                 cells[metric] = self._cell(body, _rgb(ink), r, 1 + 2 * i)
+                if metric == "followers":
+                    anchor = p.name   # this row drew a real followers cell
             self._popup_rows[p.name] = cells
             r += 1
-            prev_name = p.name
 
         tk.Frame(body, bg="#2a2a2a", height=1).grid(
             row=r, column=0, columnspan=1 + 2 * len(self._visible_metrics()),
@@ -515,10 +519,48 @@ class SocialWidget:
         return [m for m in _METRICS if m in self.visible]
 
     def _visible_providers(self) -> list:
-        """Only platforms selected in the Platforms menu. An unselected platform
-        isn't polled and isn't drawn — the popup shrinks by that row instead of
-        parking a permanent dash where a disabled platform used to sit."""
-        return [p for p in self.providers if p.enabled]
+        """Platforms selected in the Platforms menu, minus any row folded into
+        another (VK Clips into VK Video when the merge is on). An unselected or
+        folded platform isn't drawn — the popup shrinks by that row instead of
+        parking a permanent dash where it used to sit."""
+        gone = {n for names in self._folded().values() for n in names}
+        return [p for p in self.providers if p.enabled and p.name not in gone]
+
+    def _folded(self) -> dict:
+        """target-name -> [names folded into it] for display. Only when the
+        merge is on and both the folded row and its target are enabled."""
+        if not self.settings.get("merge_vkvideo_clips"):
+            return {}
+        on = {p.name for p in self.providers if p.enabled}
+        fold: dict = {}
+        for p in self.providers:
+            tgt = getattr(p, "merge_into", "")
+            if tgt and p.name in on and tgt in on:
+                fold.setdefault(tgt, []).append(p.name)
+        return fold
+
+    def _row_names(self, name: str) -> list:
+        """The provider(s) whose numbers a display row shows — itself plus any
+        folded into it."""
+        return [name] + self._folded().get(name, [])
+
+    def _row_metric(self, name: str, metric: str):
+        """A display row's value for `metric`, summing any folded-in providers.
+        None when no contributing provider has the value (→ a dash)."""
+        vals = []
+        for n in self._row_names(name):
+            m = self.metrics.get(n)
+            if m and m.ok:
+                v = getattr(m, metric, None)
+                if v is not None:
+                    vals.append(v)
+        return sum(vals) if vals else None
+
+    def _row_delta(self, name: str, metric: str):
+        """A display row's delta, summing the folded-in providers' deltas."""
+        parts = [self._delta(n, metric) for n in self._row_names(name)]
+        moved = [d for d in parts if d is not None]
+        return sum(moved) if moved else None
 
     def _metric_inks(self):
         """Each visible counter and its column colour, in display order."""
@@ -567,13 +609,12 @@ class SocialWidget:
         if not self._popup_win:
             return
         for name, cells in self._popup_rows.items():
-            m = self.metrics.get(name) or Metrics(ok=False)
             for metric, (flip, delta) in cells.items():
-                value = getattr(m, metric, None) if m.ok else None
+                value = self._row_metric(name, metric)
                 try:
                     flip.set_value(f"{value:,}" if value is not None else "—",
                                    animate)
-                    self._show_delta(delta, self._delta(name, metric))
+                    self._show_delta(delta, self._row_delta(name, metric))
                 except Exception:
                     log.exception("popup row update failed")
 
@@ -657,6 +698,19 @@ class SocialWidget:
                     label, self._make_col_toggle(metric),
                     checked=(lambda m: lambda item: m in self.visible)(metric)))
 
+        def on_merge(icon, _):
+            self.settings["merge_vkvideo_clips"] = not self.settings.get(
+                "merge_vkvideo_clips")
+            save_settings(self.settings)
+            for t in self._trays():
+                t.update_menu()
+            self._post(self._rebuild_popup_if_open)
+
+        def merge_shown(_):
+            # Only meaningful when both VK Video and VK Clips are on.
+            on = {p.name for p in self.providers if p.config.get("enabled")}
+            return {"vkvideo", "vkclips"} <= on
+
         def on_mute(icon, _):
             self._muted = not self._muted
             for t in self._trays():
@@ -676,6 +730,10 @@ class SocialWidget:
                              default=True, visible=False),
             pystray.MenuItem("Platforms", pystray.Menu(*prov_items)),
             pystray.MenuItem("Show", pystray.Menu(*show_items)),
+            pystray.MenuItem("Merge VK Video + Clips", on_merge,
+                             checked=lambda _: bool(
+                                 self.settings.get("merge_vkvideo_clips")),
+                             visible=merge_shown),
             pystray.MenuItem(lambda _: "Sound: OFF" if self._muted else "Sound: ON",
                              on_mute, checked=lambda _: not self._muted),
             pystray.MenuItem("Refresh now", on_refresh),

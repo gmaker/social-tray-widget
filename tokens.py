@@ -67,5 +67,11 @@ class TokenStore:
         self.extra[key] = value
         self._write()
 
+    def update_extra(self, values: dict) -> None:
+        """Merge several extra keys and persist in a single write, so a crash
+        can't tear a multi-key update into an inconsistent on-disk state."""
+        self.extra.update(values)
+        self._write()
+
     def is_valid(self) -> bool:
         return bool(self.access_token) and time.time() < self.expiry

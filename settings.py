@@ -24,6 +24,9 @@ DEFAULTS: dict = {
     "color_subs":      [57, 135, 229],   # blue
     "color_views":     [25, 158, 112],   # aqua
     "color_likes":     [201, 133, 0],    # amber
+    # Fold the VK Clips row into VK Video (one combined video number). Off by
+    # default — the two rows show separately; toggle it from the tray menu.
+    "merge_vkvideo_clips": False,
     "providers": {
         "tiktok": {
             "enabled":       False,
@@ -84,6 +87,14 @@ DEFAULTS: dict = {
             "color":             [122, 133, 255],
             "count_views":       True,
             "views_refresh_min": 15,   # the video walk is the expensive call
+        },
+        "vkclips": {
+            "enabled":           False,
+            "service_token":     "",   # the same key as vk / vkvideo
+            "group":             "",   # the same community
+            "color":             [230, 100, 160],   # VK Clips' magenta
+            "count_views":       True,
+            "views_refresh_min": 15,   # the clip scan is the expensive call
         },
     },
 }
