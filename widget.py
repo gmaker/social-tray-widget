@@ -103,6 +103,117 @@ def _play_sound(path: str, volume: float) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Copy the popup window to the clipboard as an image (Windows) so a screenshot
+# can be pasted straight into a chat instead of cropped by hand. PrintWindow
+# grabs the window's own pixels — DPI-correct and immune to occlusion or the
+# popup sitting under the cursor — and the bitmap goes onto the clipboard as
+# CF_DIB, which every chat app pastes as an image.
+# ─────────────────────────────────────────────────────────────────────────────
+def _grab_hwnd(hwnd) -> Optional[Image.Image]:
+    import ctypes
+    from ctypes import wintypes
+    u, g = ctypes.windll.user32, ctypes.windll.gdi32
+    # 64-bit trap: functions returning/taking handles must be typed, or the
+    # pointers silently truncate to 32-bit and the calls corrupt or no-op.
+    u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    u.GetWindowDC.restype  = wintypes.HDC
+    u.GetWindowDC.argtypes = [wintypes.HWND]
+    u.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+    u.ReleaseDC.argtypes   = [wintypes.HWND, wintypes.HDC]
+    g.CreateCompatibleDC.restype  = wintypes.HDC
+    g.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    g.CreateCompatibleBitmap.restype  = wintypes.HBITMAP
+    g.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+    g.SelectObject.restype  = wintypes.HGDIOBJ
+    g.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+    g.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT,
+                            wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p,
+                            wintypes.UINT]
+    g.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    g.DeleteDC.argtypes     = [wintypes.HDC]
+
+    rect = wintypes.RECT()
+    if not u.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    w, h = rect.right - rect.left, rect.bottom - rect.top
+    if w <= 0 or h <= 0:
+        return None
+    hdc = u.GetWindowDC(hwnd)
+    mem = g.CreateCompatibleDC(hdc)
+    bmp = g.CreateCompatibleBitmap(hdc, w, h)
+    old = g.SelectObject(mem, bmp)
+    try:
+        # PW_RENDERFULLCONTENT = 2 — renders the whole window, GDI or not.
+        if not u.PrintWindow(hwnd, mem, 2):
+            return None
+
+        class _BMIH(ctypes.Structure):
+            _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                        ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                        ("biBitCount", wintypes.WORD),
+                        ("biCompression", wintypes.DWORD),
+                        ("biSizeImage", wintypes.DWORD),
+                        ("biXPelsPerMeter", wintypes.LONG),
+                        ("biYPelsPerMeter", wintypes.LONG),
+                        ("biClrUsed", wintypes.DWORD),
+                        ("biClrImportant", wintypes.DWORD)]
+
+        bmi = _BMIH()
+        bmi.biSize = ctypes.sizeof(_BMIH)
+        bmi.biWidth, bmi.biHeight = w, -h     # negative height = top-down rows
+        bmi.biPlanes, bmi.biBitCount = 1, 32
+        bmi.biCompression = 0                 # BI_RGB
+        buf = (ctypes.c_char * (w * h * 4))()
+        if not g.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(bmi), 0):
+            return None
+        return Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
+    finally:
+        g.SelectObject(mem, old)
+        g.DeleteObject(bmp)
+        g.DeleteDC(mem)
+        u.ReleaseDC(hwnd, hdc)
+
+
+def _image_to_clipboard(img: Image.Image) -> bool:
+    import ctypes
+    import io
+    from ctypes import wintypes
+    out = io.BytesIO()
+    img.convert("RGB").save(out, "BMP")
+    dib = out.getvalue()[14:]     # strip the 14-byte BMP file header -> raw DIB
+    out.close()
+
+    u, k = ctypes.windll.user32, ctypes.windll.kernel32
+    u.OpenClipboard.argtypes     = [wintypes.HWND]
+    u.SetClipboardData.restype   = wintypes.HANDLE
+    u.SetClipboardData.argtypes  = [wintypes.UINT, wintypes.HANDLE]
+    k.GlobalAlloc.restype  = wintypes.HANDLE
+    k.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    k.GlobalLock.restype   = ctypes.c_void_p
+    k.GlobalLock.argtypes  = [wintypes.HANDLE]
+    k.GlobalUnlock.argtypes = [wintypes.HANDLE]
+    k.GlobalFree.argtypes   = [wintypes.HANDLE]
+    CF_DIB, GMEM_MOVEABLE = 8, 0x0002
+
+    if not u.OpenClipboard(None):
+        return False
+    try:
+        u.EmptyClipboard()
+        hglob = k.GlobalAlloc(GMEM_MOVEABLE, len(dib))
+        if not hglob:
+            return False
+        ptr = k.GlobalLock(hglob)
+        ctypes.memmove(ptr, dib, len(dib))
+        k.GlobalUnlock(hglob)
+        if not u.SetClipboardData(CF_DIB, hglob):
+            k.GlobalFree(hglob)   # ownership stays ours only on failure
+            return False
+        return True               # on success the system owns the memory
+    finally:
+        u.CloseClipboard()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Split-flap animated value (unchanged from the original widget).
 # ─────────────────────────────────────────────────────────────────────────────
 class _FlipValue(tk.Frame):
@@ -110,7 +221,8 @@ class _FlipValue(tk.Frame):
     _FRAME_MS = 50
     _STAGGER  = 35
 
-    def __init__(self, parent, color: str, bg: str = "#141414", on_click=None):
+    def __init__(self, parent, color: str, bg: str = "#141414", on_click=None,
+                 on_rclick=None):
         super().__init__(parent, bg=bg)
         self._color = color
         self._bg    = bg
@@ -118,9 +230,12 @@ class _FlipValue(tk.Frame):
         self._text  = ""
         # Held rather than bound once: _rebuild() throws every label away, so a
         # binding made from outside would survive only until the value changes.
-        self._on_click = on_click
+        self._on_click  = on_click
+        self._on_rclick = on_rclick
         if on_click:
             self.bind("<Button-1>", on_click)
+        if on_rclick:
+            self.bind("<Button-3>", on_rclick)
 
     def set_value(self, text: str, animate: bool = True):
         if text == self._text:
@@ -144,6 +259,8 @@ class _FlipValue(tk.Frame):
                            padx=0, pady=0, bd=0, highlightthickness=0)
             if self._on_click:
                 lbl.bind("<Button-1>", self._on_click)
+            if self._on_rclick:
+                lbl.bind("<Button-3>", self._on_rclick)
             lbl.pack(side="left")
             self._lbls.append(lbl)
 
@@ -438,6 +555,7 @@ class SocialWidget:
 
         border = tk.Frame(win, bg="#383838", padx=1, pady=1)
         border.pack(fill="both", expand=True)
+        self._popup_border = border   # flashed green/red to confirm a copy
         body = tk.Frame(border, bg="#141414", padx=14, pady=12)
         body.pack(fill="both", expand=True)
 
@@ -507,6 +625,10 @@ class SocialWidget:
         # whole tree — a click lands on whichever label is under the cursor, not
         # on the window. Labels _FlipValue builds later carry their own binding.
         self._bind_reset(win)
+        # Right-click anywhere on the popup copies a screenshot of it to the
+        # clipboard. Same recursive bind; the split-flap number cells rebind
+        # themselves through _FlipValue's on_rclick.
+        self._bind_copy(win)
 
     def _load_visible(self, settings) -> set:
         show = settings.get("show_columns")
@@ -575,7 +697,8 @@ class SocialWidget:
         keeps every number in a column sharing one right edge — a row with no
         delta no longer shoves its number sideways to make room for a "(+12)"
         that isn't there."""
-        flip = _FlipValue(parent, ink, on_click=self._reset_baselines)
+        flip = _FlipValue(parent, ink, on_click=self._reset_baselines,
+                          on_rclick=self._on_copy_screenshot)
         flip.grid(row=row, column=column, sticky="e", padx=(18, 0))
         delta = tk.Label(parent, text="", fg=_DELTA_UP, bg="#141414",
                          font=("Segoe UI", 8, "bold"))
@@ -586,6 +709,66 @@ class SocialWidget:
         widget.bind("<Button-1>", self._reset_baselines)
         for child in widget.winfo_children():
             self._bind_reset(child)
+
+    def _bind_copy(self, widget):
+        widget.bind("<Button-3>", self._on_copy_screenshot)
+        for child in widget.winfo_children():
+            self._bind_copy(child)
+
+    # ── screenshot to clipboard ─────────────────────────────────────────────
+    def _on_copy_screenshot(self, event=None):
+        """Right-click on the popup: copy a picture of it to the clipboard so it
+        can be pasted straight into a chat — no Snipping Tool."""
+        self._capture_popup()
+        return "break"     # don't also fire any left-click/reset semantics
+
+    def _copy_via_menu(self):
+        """Tray-menu 'Copy screenshot': open the popup first if it's closed, let
+        it lay out, then grab it."""
+        if self._popup_win is not None:
+            self._capture_popup()
+            return
+        self._build_popup()
+        if self._root is not None:
+            self._root.after(200, self._capture_popup)
+
+    def _capture_popup(self):
+        win = self._popup_win
+        if win is None:
+            return
+        ok = False
+        try:
+            import ctypes
+            u = ctypes.windll.user32
+            u.GetAncestor.restype  = ctypes.c_void_p
+            u.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            # GA_ROOT = 2 — the real top-level HWND behind Tk's popup.
+            hwnd = u.GetAncestor(win.winfo_id(), 2) or win.winfo_id()
+            img  = _grab_hwnd(hwnd) if hwnd else None
+            ok   = bool(img) and _image_to_clipboard(img)
+        except Exception:
+            log.exception("copy screenshot failed")
+        if not ok:
+            log.warning("copy screenshot: capture or clipboard write failed")
+        self._flash_border(_DELTA_UP if ok else _DELTA_DOWN)
+
+    def _flash_border(self, color: str):
+        """A brief border tint — green on a successful copy, red on failure — so
+        the copy has visible feedback. Runs after the grab, never in the shot."""
+        border = getattr(self, "_popup_border", None)
+        if border is None:
+            return
+        try:
+            border.configure(bg=color)
+            border.after(220, lambda: self._restore_border(border))
+        except tk.TclError:
+            pass
+
+    def _restore_border(self, border):
+        try:
+            border.configure(bg="#383838")
+        except tk.TclError:
+            pass
 
     def _position_popup(self):
         # Re-fit the window to its content and re-anchor it to the bottom-right
@@ -719,6 +902,9 @@ class SocialWidget:
         def on_refresh(icon, _):
             threading.Thread(target=self._poll_once, daemon=True).start()
 
+        def on_copy(icon, _):
+            self._post(self._copy_via_menu)
+
         def on_exit(icon, _):
             self.running = False
             for t in self._trays():
@@ -737,6 +923,7 @@ class SocialWidget:
             pystray.MenuItem(lambda _: "Sound: OFF" if self._muted else "Sound: ON",
                              on_mute, checked=lambda _: not self._muted),
             pystray.MenuItem("Refresh now", on_refresh),
+            pystray.MenuItem("Copy screenshot", on_copy),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", on_exit),
         )
