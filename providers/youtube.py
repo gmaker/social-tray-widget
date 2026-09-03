@@ -1,5 +1,5 @@
-"""YouTube provider — Google OAuth2. One channels.list call yields both the
-subscriber count and the channel's total view count; likes cost more.
+"""YouTube provider — Google OAuth2. One channels.list call yields the
+subscriber count; views and likes are summed over every upload.
 
 Setup: a Google Cloud project with the *YouTube Data API v3* enabled and an
 OAuth client of type "Web application" whose authorised redirect URI exactly
@@ -10,18 +10,29 @@ after 7 days and every poll then dies with `invalid_grant`.
 Note: YouTube rounds the public subscriber count to 3 significant figures; the
 API cannot return the exact number even to the channel owner.
 
-Quota, the reason likes are cached: the daily budget is 10,000 units.
-channels.list is 1 unit, so polling followers/views every minute costs 1,440 a
-day — 14%. Likes have no channel-level total: they mean walking the uploads
-playlist and reading statistics 50 videos at a time, which is
-2 x ceil(videos / 50) units a pass. At 133 videos that is 6 units — 10,080 a day
-once a minute, i.e. over budget on its own. Once every `likes_refresh_min`
-minutes it rounds to a fifth of the quota with room for the channel to grow.
+Views deliberately do NOT come from the channel's statistics.viewCount. That
+is an aggregate YouTube recomputes with hours of lag (and, for Shorts, by a
+stricter "engaged views" method), so a fresh Short sitting at a thousand
+views shows up there a day later — if fully at all. Per-video counts are
+current, so views ride the same uploads walk as likes: statistics carries
+both viewCount and likeCount, so the second number is free. The trade-off is
+that views of since-deleted videos, which the channel aggregate keeps for
+ever, drop out of the sum. The channel counter is still used as a fallback
+when the walk is off or has never succeeded.
+
+Quota, the reason the walk is cached: the daily budget is 10,000 units.
+channels.list is 1 unit, so polling followers every minute costs 1,440 a day —
+14%. The walk reads the uploads playlist and then statistics 50 videos at a
+time, which is 2 x ceil(videos / 50) units a pass. At 133 videos that is
+6 units — 10,080 a day once a minute, i.e. over budget on its own. Once every
+`likes_refresh_min` minutes it rounds to a fifth of the quota with room for
+the channel to grow.
 
 Config (settings.json -> providers.youtube):
     "client_id" / "client_secret": required
     "count_likes":       default true; false skips the uploads walk entirely
-    "likes_refresh_min": default 15
+                         (likes go dash, views fall back to the channel counter)
+    "likes_refresh_min": default 15 — minutes between walk passes (views+likes)
 """
 
 from __future__ import annotations
@@ -130,6 +141,10 @@ class YouTubeProvider(Provider):
             headers=self._auth(),
             timeout=20,
         )
+        if not r.ok:
+            # The body names the reason (quotaExceeded / accessNotConfigured /
+            # forbidden); HTTPError's message alone is just "403 Forbidden".
+            log.error("youtube channels.list HTTP %s: %s", r.status_code, r.text[:500])
         r.raise_for_status()
         items = r.json().get("items", [])
         if not items:
@@ -137,51 +152,64 @@ class YouTubeProvider(Provider):
         st = items[0].get("statistics", {})
         uploads = ((items[0].get("contentDetails") or {})
                    .get("relatedPlaylists") or {}).get("uploads", "")
+        views, likes = self._walk_totals(uploads, int(st.get("viewCount", 0)))
         return Metrics(followers=int(st.get("subscriberCount", 0)),
-                       views=int(st.get("viewCount", 0)),
-                       likes=self._likes(uploads))
+                       views=views, likes=likes)
 
     def _auth(self) -> dict:
         return {"Authorization": f"Bearer {self.tokens.access_token}"}
 
-    # ── likes ───────────────────────────────────────────────────────────────
-    def _likes(self, uploads: str):
-        """Likes summed over every upload, refreshed at most every
+    # ── uploads walk: views + likes ─────────────────────────────────────────
+    def _walk_totals(self, uploads: str, channel_views: int) -> tuple:
+        """(views, likes) summed over every upload, refreshed at most every
         `likes_refresh_min` minutes and cached in the token file between runs.
 
-        Returns None when the number isn't available, which the widget shows as
-        a dash rather than a misleading zero.
+        Per-video viewCount is current where the channel aggregate lags by
+        hours, so views come from this walk too — same statistics call, no
+        extra quota. When the walk is off, or nothing has been cached yet and
+        it fails, views fall back to the channel counter and likes to None
+        (a dash rather than a misleading zero).
         """
         if not self.config.get("count_likes", True) or not uploads:
-            return None
-        cached = self.tokens.extra.get("likes_total")
-        every  = int(self.config.get("likes_refresh_min", 15)) * 60
-        if cached is not None:
-            if time.time() < self.tokens.extra.get("likes_at", 0) + every:
-                return int(cached)
+            return channel_views, None
+        extra = self.tokens.extra
+        have  = "views_total" in extra and "likes_total" in extra
+        every = int(self.config.get("likes_refresh_min", 15)) * 60
+        if have and time.time() < extra.get("walk_at", 0) + every:
+            return int(extra["views_total"]), int(extra["likes_total"])
         try:
-            total = self._sum_likes(uploads)
+            views, likes = self._sum_uploads(uploads)
         except Exception:
-            # Likes are the extra; never let them cost us subs and views.
-            log.exception("youtube: likes walk failed, reusing cached value")
-            return None if cached is None else int(cached)
-        self.tokens.set_extra("likes_total", total)
-        self.tokens.set_extra("likes_at", time.time())
-        return total
+            # The walk is the extra; never let it cost us the follower count.
+            log.exception("youtube: uploads walk failed, reusing cached values")
+            if have:
+                return int(extra["views_total"]), int(extra["likes_total"])
+            likes = extra.get("likes_total")   # pre-views_total token files
+            return channel_views, None if likes is None else int(likes)
+        # One write: the two sums and their timestamp belong together. Drop
+        # the pre-views-walk stamp so an upgraded token file doesn't keep it.
+        self.tokens.extra.pop("likes_at", None)
+        self.tokens.update_extra({"views_total": views, "likes_total": likes,
+                                  "walk_at": time.time()})
+        return views, likes
 
-    def _sum_likes(self, uploads: str) -> int:
+    def _sum_uploads(self, uploads: str) -> tuple:
         ids   = self._upload_ids(uploads)
-        total = 0
+        views = likes = 0
         for i in range(0, len(ids), _PER_PAGE):
             r = requests.get(_VIDEOS, params={
                 "part": "statistics", "id": ",".join(ids[i:i + _PER_PAGE]),
                 "maxResults": _PER_PAGE,
             }, headers=self._auth(), timeout=20)
+            if not r.ok:
+                log.error("youtube videos.list HTTP %s: %s", r.status_code, r.text[:500])
             r.raise_for_status()
             for item in r.json().get("items", []):
+                st = item.get("statistics") or {}
+                views += int(st.get("viewCount") or 0)
                 # likeCount is absent when the uploader hides it.
-                total += int((item.get("statistics") or {}).get("likeCount") or 0)
-        return total
+                likes += int(st.get("likeCount") or 0)
+        return views, likes
 
     def _upload_ids(self, uploads: str) -> list:
         ids, page = [], None
@@ -192,6 +220,8 @@ class YouTubeProvider(Provider):
                 params["pageToken"] = page
             r = requests.get(_PLAYLIST, params=params, headers=self._auth(),
                              timeout=20)
+            if not r.ok:
+                log.error("youtube playlistItems HTTP %s: %s", r.status_code, r.text[:500])
             r.raise_for_status()
             body = r.json()
             ids += [it["contentDetails"]["videoId"]
