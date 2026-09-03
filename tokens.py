@@ -43,13 +43,21 @@ class TokenStore:
     def _write(self) -> None:
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
+            # Write beside the file and swap it in: open(..., "w") truncates
+            # first, so a crash mid-dump would leave 0 bytes and _load would
+            # come back empty — refresh token and all. os.replace swaps whole
+            # files, so the live one is only ever a complete document.
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({
                     "access_token":  self.access_token,
                     "refresh_token": self.refresh_token,
                     "expiry":        self.expiry,
                     "extra":         self.extra,
                 }, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
         except Exception:
             pass
 
