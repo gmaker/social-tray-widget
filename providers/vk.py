@@ -66,7 +66,7 @@ import time
 
 import requests
 
-from .base import Metrics, Provider
+from .base import Metrics, Provider, stale_strike
 
 log = logging.getLogger("social.vk")
 
@@ -90,10 +90,6 @@ _CLIP_CHUNK  = 50    # ids consumed per video.get videos= call (the API cap)
 _SCAN_MARGIN = 60    # start the id scan this far below the earliest known id
 _SCAN_STOP   = 3     # consecutive empty windows that mean "past the last id"
 _SCAN_CAP    = 60    # windows hard-cap, a backstop against a runaway scan
-
-# Consecutive walks that must show "same items, fewer views" before the drop
-# is believed (see the stale-replica guard in _VKBase._totals).
-_STALE_STRIKES = 2
 
 
 def _is_stub(o: dict) -> bool:
@@ -238,33 +234,19 @@ class _VKBase(Provider):
             log.warning("%s: %s during walk, reusing cached totals",
                         self.name, _TOKEN_RE.sub("access_token=***", str(exc)))
             return cached
-        # Stale-replica guard. VK's backends are eventually consistent: now
-        # and then a walk returns the SAME items with old, much lower view
-        # counts (seen live: 17 videos summing 26,293 one call, 98,360 the
-        # next). Views only ever fall when an item disappears — which also
-        # lowers the item count — so "as many items, fewer views" can only be
-        # stale data. Keep the good cache; the next pass re-reads.
-        # ...unless the creator deleted a post and re-posted within one refresh
-        # window: same count, views down for good. A replica is gone by the
-        # next scheduled walk, a deletion is not - so keep the cache for one
-        # pass (stamping the pass, or the walk would re-run on EVERY poll, 15x
-        # the cadence and past the daily quota on a big wall) and accept the
-        # drop when the next walk still shows it.
-        prev_n = extra.get("items_count")
-        if (walked and prev_n is not None and n >= int(prev_n)
-                and views < int(extra.get("views_total", 0))):
-            strikes = int(extra.get("stale_strikes", 0)) + 1
-            if strikes < _STALE_STRIKES:
-                log.warning("%s: walk returned %d items but views fell %d -> %d; "
-                            "stale replica (%d/%d), keeping cached totals",
-                            self.name, n, int(extra.get("views_total", 0)),
-                            views, strikes, _STALE_STRIKES)
-                self.tokens.update_extra({"stale_strikes": strikes,
-                                          "totals_at": time.time()})
-                return cached
-            log.warning("%s: views still %d -> %d over %d items on walk %d; "
-                        "a real drop, accepting", self.name,
-                        int(extra.get("views_total", 0)), views, n, strikes)
+        # Stale-replica guard (base.stale_strike): VK's backends are
+        # eventually consistent, and now and then a walk returns no fewer
+        # items but old, much lower view counts. A held walk still stamps
+        # the pass, or it would re-run on EVERY poll — 15x the cadence and
+        # past the daily quota on a big wall. Guarded only once the cache is
+        # complete: a hold on a pre-comments token file would be re-walked
+        # on the very next poll anyway (has_comments bypasses the window).
+        strike = (stale_strike(log, extra, self.name, n, views)
+                  if has_comments else 0)
+        if strike:
+            self.tokens.update_extra({"stale_strikes": strike,
+                                      "totals_at": time.time()})
+            return cached
         # One write: the sums, their item count and timestamp belong together.
         self.tokens.update_extra({"views_total": views, "likes_total": likes,
                                   "comments_total": comments,

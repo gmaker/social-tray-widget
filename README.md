@@ -117,6 +117,8 @@ Posts made before the account switched to professional never report insights, so
 ⁵ VK Video: `video.get` returns no `comments` field for a long video under a service key — not in the listing, not by id, not with `extended=1`, on any community — and `video.getComments` refuses service keys outright (error 28). Clips and wall posts do report theirs, so only this row shows a dash.
 ⁴ YouTube: views are the per-video counters summed over the uploads walk, not the channel's `statistics.viewCount` — YouTube recomputes that aggregate with hours of lag (and, for Shorts, by a stricter method), so a fresh Short shows up there a day later, if fully at all. The sum excludes views of since-deleted videos, which the channel counter keeps forever; the channel counter remains the fallback when the walk is off.
 
+The YouTube and VK sums are guarded against stale reads. VK's backends are eventually consistent (a walk can return the same 17 videos summing a quarter of the previous total) and YouTube's per-video counters jitter by a few views between calls, so a walk that returns as many items as before (or more) but fewer views is held for one pass and believed only when the next pass repeats it — a stale read of the same items never shows on its own, a repeated one is taken as real. A real deletion shows up as fewer items and is accepted at once.
+
 ---
 
 ## Settings reference
@@ -302,6 +304,8 @@ Bot API не отдаёт ни просмотры постов, ни реакц�
 ³ **VK Clips** — короткие вертикальные видео. Списочного метода для них в публичном API нет, поэтому виджет определяет id каждого клипа сканом соседних видео-id сообщества и читает статистику пачками только из клипов (см. раздел VK). Нужен хотя бы один обычный ролик, чтобы задать диапазон id — сообщество из одних клипов посчитать нельзя. Строку можно слить с VK Video через трей (**Merge VK Video + Clips**) в одно общее видео-число.
 ⁵ VK Video: `video.get` под сервисным ключом не отдаёт поле `comments` у длинных роликов — ни в списке, ни по id, ни с `extended=1`, ни у какого сообщества, — а `video.getComments` сервисный ключ отвергает сразу (ошибка 28). Клипы и посты стены свои комментарии отдают, поэтому прочерк только в этой строке.
 ⁴ YouTube: просмотры — сумма per-video счётчиков по обходу загрузок, а не канальный `statistics.viewCount`: этот агрегат YouTube пересчитывает с лагом в часы (а Shorts — по более строгой методике), и свежий шортс попадает туда через сутки, если попадает целиком. В сумму не входят просмотры удалённых видео, которые в канальном счётчике остаются навсегда; канальный счётчик остаётся запасным, когда обход выключен.
+
+Суммы YouTube и VK-строк защищены от устаревших чтений. Бэкенды VK согласованы не мгновенно (обход может вернуть те же 17 роликов с четвертью прежней суммы), а per-video счётчики YouTube дрожат на несколько просмотров от вызова к вызову, поэтому обход, вернувший столько же элементов (или больше), но меньше просмотров, придерживается на один проход и принимается, только если следующий проход его повторил — одиночное устаревшее чтение того же набора элементов не показывается, повторившееся считается настоящим. Настоящее удаление видно по уменьшению числа элементов и принимается сразу.
 
 ---
 
