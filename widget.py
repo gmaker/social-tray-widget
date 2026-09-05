@@ -301,7 +301,7 @@ class SocialWidget:
         self.metrics: dict = {p.name: Metrics(ok=False) for p in providers}
         self.running    = True
         self._poll_lock = threading.Lock()
-        self._prev_subs: Optional[int] = None
+        self._prev_followers: dict = {}   # provider -> last good follower count
 
         self.poll_interval = int(settings.get("poll_interval", 60))
         self.color_subs    = tuple(settings.get("color_subs",  [254, 44, 85]))
@@ -518,15 +518,26 @@ class SocialWidget:
             self._tray_views.icon  = self._make_icon(self._fmt(views), self.color_views)
             self._tray_views.title = f"Views (total): {views:,}"
         self._apply_popup_values()
-        self._maybe_sound(subs)
+        self._maybe_sound()
 
-    def _maybe_sound(self, subs: int):
-        if (self._prev_subs is not None and subs > self._prev_subs
-                and self.sound_enabled and not self._muted):
+    def _maybe_sound(self):
+        """Chime when a platform has more followers than at its own last
+        successful reading. Per platform, not the tray total: a platform that
+        fails one poll drops out of the total and comes back the next, which
+        read as a gain and chimed for nothing. A failed poll keeps the last
+        good number, so a dash is never mistaken for a loss."""
+        grew = False
+        for name, m in self.metrics.items():
+            if not m.ok or m.followers is None:
+                continue
+            prev = self._prev_followers.get(name)
+            if prev is not None and m.followers > prev:
+                grew = True
+            self._prev_followers[name] = m.followers
+        if grew and self.sound_enabled and not self._muted:
             threading.Thread(target=_play_sound,
                              args=(self.sound_path, self.sound_volume),
                              daemon=True).start()
-        self._prev_subs = subs
 
     # ── popup ─────────────────────────────────────────────────────────────────
     def _show_popup(self):
