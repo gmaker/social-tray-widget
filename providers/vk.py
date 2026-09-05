@@ -57,6 +57,7 @@ Config (settings.json -> providers.vk / providers.vkvideo / providers.vkclips):
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 import requests
@@ -76,11 +77,19 @@ _THROTTLE_CODES = {6, 9, 29}
 # resolveScreenName types that negate into a community owner_id.
 _COMMUNITY_TYPES = ("group", "page", "event")
 
+# requests' ConnectionError/ProxyError text embeds the request URL - service
+# key included - so anything that logs str(exc) must go through this first.
+_TOKEN_RE = re.compile(r"access_token=[^&\s]+")
+
 # Clip discovery/stat tuning (VKClipsProvider).
 _CLIP_CHUNK  = 50    # ids consumed per video.get videos= call (the API cap)
 _SCAN_MARGIN = 60    # start the id scan this far below the earliest known id
 _SCAN_STOP   = 3     # consecutive empty windows that mean "past the last id"
 _SCAN_CAP    = 60    # windows hard-cap, a backstop against a runaway scan
+
+# Consecutive walks that must show "same items, fewer views" before the drop
+# is believed (see the stale-replica guard in _VKBase._totals).
+_STALE_STRIKES = 2
 
 
 def _is_stub(o: dict) -> bool:
@@ -155,7 +164,8 @@ class _VKBase(Provider):
         extra = self.tokens.extra
         prev  = str(extra.get("group_id") or "")
         if prev and prev != gid:
-            for k in ("totals_at", "views_total", "likes_total", "clip_ids"):
+            for k in ("totals_at", "views_total", "likes_total", "clip_ids",
+                      "items_count", "stale_strikes"):
                 extra.pop(k, None)
         if prev != gid:
             self.tokens.set_extra("group_id", gid)
@@ -186,7 +196,7 @@ class _VKBase(Provider):
         if walked and time.time() < extra.get("totals_at", 0) + every:
             return cached
         try:
-            views, likes = self._compute_totals()
+            views, likes, n = self._compute_totals()
         except VKError as exc:
             if exc.code not in _THROTTLE_CODES:
                 raise
@@ -199,28 +209,57 @@ class _VKBase(Provider):
             # Transport trouble — a timeout, a 5xx, a non-JSON body from a
             # middlebox — is as transient as a throttle: same treatment.
             log.warning("%s: %s during walk, reusing cached totals",
-                        self.name, exc)
+                        self.name, _TOKEN_RE.sub("access_token=***", str(exc)))
             return cached
-        self.tokens.set_extra("views_total", views)
-        self.tokens.set_extra("likes_total", likes)
-        self.tokens.set_extra("totals_at", time.time())
+        # Stale-replica guard. VK's backends are eventually consistent: now
+        # and then a walk returns the SAME items with old, much lower view
+        # counts (seen live: 17 videos summing 26,293 one call, 98,360 the
+        # next). Views only ever fall when an item disappears — which also
+        # lowers the item count — so "as many items, fewer views" can only be
+        # stale data. Keep the good cache; the next pass re-reads.
+        # ...unless the creator deleted a post and re-posted within one refresh
+        # window: same count, views down for good. A replica is gone by the
+        # next scheduled walk, a deletion is not - so keep the cache for one
+        # pass (stamping the pass, or the walk would re-run on EVERY poll, 15x
+        # the cadence and past the daily quota on a big wall) and accept the
+        # drop when the next walk still shows it.
+        prev_n = extra.get("items_count")
+        if (walked and prev_n is not None and n >= int(prev_n)
+                and views < int(extra.get("views_total", 0))):
+            strikes = int(extra.get("stale_strikes", 0)) + 1
+            if strikes < _STALE_STRIKES:
+                log.warning("%s: walk returned %d items but views fell %d -> %d; "
+                            "stale replica (%d/%d), keeping cached totals",
+                            self.name, n, int(extra.get("views_total", 0)),
+                            views, strikes, _STALE_STRIKES)
+                self.tokens.update_extra({"stale_strikes": strikes,
+                                          "totals_at": time.time()})
+                return cached
+            log.warning("%s: views still %d -> %d over %d items on walk %d; "
+                        "a real drop, accepting", self.name,
+                        int(extra.get("views_total", 0)), views, n, strikes)
+        # One write: the sums, their item count and timestamp belong together.
+        self.tokens.update_extra({"views_total": views, "likes_total": likes,
+                                  "items_count": n, "totals_at": time.time(),
+                                  "stale_strikes": 0})
         return views, likes
 
     def _compute_totals(self) -> tuple:
-        """Sum (views, likes). Default: page the owner's items through
-        `_walk_page`; overridden where the totals come from an explicit id list
-        (clips have no list method)."""
-        views = likes = offset = 0
+        """(views, likes, items summed). Default: page the owner's items
+        through `_walk_page`; overridden where the totals come from an explicit
+        id list (clips have no list method)."""
+        views = likes = offset = n = 0
         total = None                  # real bound learned from the first page
         while total is None or offset < total:
             items, total = self._walk_page(offset)
             for v, l in items:
                 views += v
                 likes += l
+            n += len(items)
             # Hidden items make pages short or even empty — the response's
             # total count is the bound, not the page contents.
             offset += _PER_PAGE
-        return views, likes
+        return views, likes, n
 
     def _walk_page(self, offset: int) -> tuple:
         """One page of (views, likes) pairs plus the response's total count."""
@@ -305,7 +344,7 @@ class VKClipsProvider(_VKBase):
                 views, likes, live = self._clip_stats(
                     owner, sorted(set(ids) | found))
         self.tokens.set_extra("clip_ids", sorted(live))
-        return views, likes
+        return views, likes, len(live)
 
     def _clips_count(self) -> int:
         resp = _call(self._token(), "groups.getById",
