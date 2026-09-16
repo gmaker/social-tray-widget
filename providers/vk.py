@@ -9,8 +9,10 @@ counted by the wall row.
                      likes / views / comments = summed over wall posts (wall.get)
   * VKVideoProvider  followers = None (same community — never counted twice)
                      likes / views = summed over the long videos (video.get)
-                     comments = None: a service key never sees a long video's
-                     comment count (see `counts_comments`)
+                     comments = summed too, but read off the community wall:
+                     video.get strips the field under a service key, the copy
+                     of the video embedded in its wall post keeps it (see
+                     _WALL_COMMENTS)
   * VKClipsProvider  followers = None (same community again)
                      likes / views / comments = summed over the community's
                      clips, which the public API exposes only by explicit id
@@ -66,7 +68,7 @@ import time
 
 import requests
 
-from .base import Metrics, Provider
+from .base import Metrics, Provider, stale_strike
 
 log = logging.getLogger("social.vk")
 
@@ -90,10 +92,6 @@ _CLIP_CHUNK  = 50    # ids consumed per video.get videos= call (the API cap)
 _SCAN_MARGIN = 60    # start the id scan this far below the earliest known id
 _SCAN_STOP   = 3     # consecutive empty windows that mean "past the last id"
 _SCAN_CAP    = 60    # windows hard-cap, a backstop against a runaway scan
-
-# Consecutive walks that must show "same items, fewer views" before the drop
-# is believed (see the stale-replica guard in _VKBase._totals).
-_STALE_STRIKES = 2
 
 
 def _is_stub(o: dict) -> bool:
@@ -122,17 +120,86 @@ def _call(token: str, method: str, **params) -> dict:
     return d.get("response", {})
 
 
+# Comment counts of a community's LONG videos, harvested from its wall. Under a
+# service key video.get strips `comments` (and can_comment) from a long video —
+# in the listing, by id, with extended=1, at every API version — and
+# video.getComments is refused (error 28). But the very same video object,
+# embedded as a wall post's attachment, keeps the field (verified 2026-09-16:
+# the numbers differ from the post's own comments.count — post 100 has 4, its
+# video 1 — and on clips, where video.get does return the field, they match it
+# exactly). So whichever row walks the wall first fills this memo — normally the
+# VK row, whose wall.get responses carry the attachments anyway — and the VK
+# Video row reads it: a poll costs no extra call. A harvest stays live for its
+# walker's own refresh window (a VK row on a slower cadence is not
+# second-guessed), and one the VK row rejected as a stale replica is dropped.
+# When the VK row is off, or no live harvest exists, the video row walks the
+# wall itself. A video never posted to the wall has no entry.
+#   owner id -> {"at": walk start, "ttl": walker's window, "done": whole wall
+#                seen, "map": {video id: comments}}
+_WALL_COMMENTS: dict = {}
+
+
+def _wall_page(token: str, owner: str, offset: int, ttl: float) -> dict:
+    """One wall.get page (the raw response), harvested into _WALL_COMMENTS;
+    `ttl` is the walker's refresh window, how long the harvest stays live."""
+    resp = _call(token, "wall.get", owner_id=owner, count=_PER_PAGE,
+                 offset=offset)
+    _harvest_wall(owner, offset, resp, ttl)
+    return resp
+
+
+def _harvest_wall(owner: str, offset: int, resp: dict, ttl: float) -> None:
+    """Record the long-video comment counts a wall page carries. Page 0 starts
+    a fresh walk; `done` flips once the page reaches the wall's total, so an
+    aborted walk is never mistaken for a complete one. Every non-clip type
+    counts (music_video and movie are long videos too — clips have their own
+    row). Attachments missing the field (VK may one day strip it here too)
+    are left out rather than recorded as 0."""
+    if offset == 0:
+        _WALL_COMMENTS[owner] = {"at": time.time(), "ttl": ttl,
+                                 "done": False, "map": {}}
+    entry = _WALL_COMMENTS.get(owner)
+    if entry is None:                  # a page of a walk this process never began
+        return
+    own = int(owner)
+    for post in resp.get("items", []):
+        atts = list(post.get("attachments") or [])
+        for repost in post.get("copy_history") or []:
+            atts += repost.get("attachments") or []
+        for a in atts:
+            v = a.get("video") if a.get("type") == "video" else None
+            if (v and int(v.get("owner_id") or 0) == own
+                    and v.get("type") != "short_video"
+                    and v.get("comments") is not None):
+                entry["map"][int(v["id"])] = int(v["comments"])
+    entry["done"] = offset + _PER_PAGE >= int(resp.get("count", 0))
+
+
+def _wall_video_comments(token: str, owner: str, every: float) -> dict:
+    """{video id: comments} for the community's long videos, off its wall:
+    a complete harvest still live — younger than its walker's window or
+    this row's, whichever is longer — if there is one, otherwise a walk made
+    now (the VK row's own paging, 100 posts a call)."""
+    entry = _WALL_COMMENTS.get(owner)
+    if (entry and entry["done"]
+            and time.time() - entry["at"] < max(every, entry.get("ttl", 0))):
+        return entry["map"]
+    offset, total = 0, None
+    while total is None or offset < total:
+        resp   = _wall_page(token, owner, offset, every)
+        total  = int(resp.get("count", 0))
+        offset += _PER_PAGE
+    return _WALL_COMMENTS[owner]["map"]
+
+
 class _VKBase(Provider):
     """Shared plumbing: config access, auth check, cached summation walks."""
 
-    # Whether the walk can count comments. Wall posts carry comments.count and
-    # clips (video.get by explicit id, type=short_video) a bare `comments` —
-    # but a LONG video never does under a service key: not in the owner
-    # listing, not by id, not with extended=1, on any community (verified
-    # 2026-09-16 on communities with thousands of visibly commented videos),
-    # and video.getComments is refused outright (error 28, "method is
-    # unavailable with service token"). A row that can't count reports None,
-    # which the popup draws as a dash — never a plausible 0.
+    # Whether the walk can count comments. Wall posts carry comments.count,
+    # clips (video.get by explicit id, type=short_video) a bare `comments`,
+    # and long videos get theirs off the wall (see _WALL_COMMENTS). A row
+    # that can't count reports None, which the popup draws as a dash — never
+    # a plausible 0; the flag stays for any row that loses the ability.
     counts_comments = True
 
     def _token(self) -> str:
@@ -238,33 +305,20 @@ class _VKBase(Provider):
             log.warning("%s: %s during walk, reusing cached totals",
                         self.name, _TOKEN_RE.sub("access_token=***", str(exc)))
             return cached
-        # Stale-replica guard. VK's backends are eventually consistent: now
-        # and then a walk returns the SAME items with old, much lower view
-        # counts (seen live: 17 videos summing 26,293 one call, 98,360 the
-        # next). Views only ever fall when an item disappears — which also
-        # lowers the item count — so "as many items, fewer views" can only be
-        # stale data. Keep the good cache; the next pass re-reads.
-        # ...unless the creator deleted a post and re-posted within one refresh
-        # window: same count, views down for good. A replica is gone by the
-        # next scheduled walk, a deletion is not - so keep the cache for one
-        # pass (stamping the pass, or the walk would re-run on EVERY poll, 15x
-        # the cadence and past the daily quota on a big wall) and accept the
-        # drop when the next walk still shows it.
-        prev_n = extra.get("items_count")
-        if (walked and prev_n is not None and n >= int(prev_n)
-                and views < int(extra.get("views_total", 0))):
-            strikes = int(extra.get("stale_strikes", 0)) + 1
-            if strikes < _STALE_STRIKES:
-                log.warning("%s: walk returned %d items but views fell %d -> %d; "
-                            "stale replica (%d/%d), keeping cached totals",
-                            self.name, n, int(extra.get("views_total", 0)),
-                            views, strikes, _STALE_STRIKES)
-                self.tokens.update_extra({"stale_strikes": strikes,
-                                          "totals_at": time.time()})
-                return cached
-            log.warning("%s: views still %d -> %d over %d items on walk %d; "
-                        "a real drop, accepting", self.name,
-                        int(extra.get("views_total", 0)), views, n, strikes)
+        # Stale-replica guard (base.stale_strike): VK's backends are
+        # eventually consistent, and now and then a walk returns no fewer
+        # items but old, much lower view counts. A held walk still stamps
+        # the pass, or it would re-run on EVERY poll — 15x the cadence and
+        # past the daily quota on a big wall. Guarded only once the cache is
+        # complete: a hold on a pre-comments token file would be re-walked
+        # on the very next poll anyway (has_comments bypasses the window).
+        strike = (stale_strike(log, extra, self.name, n, views)
+                  if has_comments else 0)
+        if strike:
+            self._stale_walk()
+            self.tokens.update_extra({"stale_strikes": strike,
+                                      "totals_at": time.time()})
+            return cached
         # One write: the sums, their item count and timestamp belong together.
         self.tokens.update_extra({"views_total": views, "likes_total": likes,
                                   "comments_total": comments,
@@ -295,6 +349,10 @@ class _VKBase(Provider):
         total count."""
         raise NotImplementedError
 
+    def _stale_walk(self) -> None:
+        """The walk just made is being held as a stale replica. A row whose
+        walk feeds shared state drops what that walk left there."""
+
 
 class VKProvider(_VKBase):
     name          = "vk"
@@ -309,14 +367,20 @@ class VKProvider(_VKBase):
                        comments=comments)
 
     def _walk_page(self, offset: int) -> tuple:
-        resp = _call(self._token(), "wall.get",
-                     owner_id=f"-{self._group_id()}",
-                     count=_PER_PAGE, offset=offset)
+        # Through _wall_page, so the video attachments' comment counts land in
+        # _WALL_COMMENTS for the VK Video row on the way.
+        resp = _wall_page(self._token(), f"-{self._group_id()}", offset,
+                          int(self.config.get("views_refresh_min", 15)) * 60)
         return ([((p.get("views") or {}).get("count", 0),
                   (p.get("likes") or {}).get("count", 0),
                   (p.get("comments") or {}).get("count", 0))
                  for p in resp.get("items", [])],
                 int(resp.get("count", 0)))
+
+    def _stale_walk(self) -> None:
+        # The held walk's pages were harvested on the way in; a replica this
+        # row would not believe is not for the VK Video row either.
+        _WALL_COMMENTS.pop(f"-{self._group_id()}", None)
 
 
 class VKVideoProvider(_VKBase):
@@ -326,7 +390,6 @@ class VKVideoProvider(_VKBase):
     default_color = (122, 133, 255)
     # One community, two rows: the popup centres VK's followers cell over both.
     followers_span_with = "vk"
-    counts_comments     = False   # dash — see _VKBase.counts_comments
 
     def fetch(self) -> Metrics:
         self._group_id()   # re-resolves (and re-walks) if `group` was re-pointed
@@ -336,16 +399,47 @@ class VKVideoProvider(_VKBase):
         return Metrics(followers=None, views=views, likes=likes,
                        comments=comments)
 
-    def _walk_page(self, offset: int) -> tuple:
-        resp = _call(self._token(), "video.get",
-                     owner_id=f"-{self._group_id()}",
-                     count=_PER_PAGE, offset=offset)
-        # No comment count here — see `counts_comments`; the 0 is a
-        # placeholder _totals turns into None.
-        return ([(int(v.get("views") or 0),
-                  (v.get("likes") or {}).get("count", 0), 0)
-                 for v in resp.get("items", [])],
-                int(resp.get("count", 0)))
+    def _compute_totals(self) -> tuple:
+        """(views, likes, comments, videos summed). Views and likes page
+        through video.get; comments come off the wall (_WALL_COMMENTS). A
+        video that was never posted to the wall counts 0 — and when none of
+        the videos is there the row can't count and reports None."""
+        token, owner = self._token(), f"-{self._group_id()}"
+        own = int(owner)
+        views = likes = offset = n = 0
+        ids, total = [], None
+        while total is None or offset < total:
+            resp  = _call(token, "video.get", owner_id=owner,
+                          count=_PER_PAGE, offset=offset)
+            items = resp.get("items", [])
+            for v in items:
+                views += int(v.get("views") or 0)
+                likes += int((v.get("likes") or {}).get("count", 0))
+                # A video added from another owner keeps that owner's id
+                # sequence — it shares no id space with ours, so it can
+                # never be looked up in the harvest (which is ours only).
+                if int(v.get("owner_id") or 0) == own:
+                    ids.append(int(v["id"]))
+            total   = int(resp.get("count", 0))
+            n      += len(items)
+            offset += _PER_PAGE
+        if not ids:            # nothing of ours to look up: no wall walk
+            return views, likes, 0, n
+        every = int(self.config.get("views_refresh_min", 15)) * 60
+        try:
+            wall = _wall_video_comments(token, owner, every)
+        except (VKError, requests.RequestException, ValueError) as exc:
+            # The wall is the extra here — views and likes are already in
+            # hand — so a wall that is off, throttled or unreachable costs
+            # the comments only: the last known count, or the dash.
+            log.warning("%s: %s reading the wall for comments, keeping the "
+                        "last count", self.name,
+                        _TOKEN_RE.sub("access_token=***", str(exc)))
+            c = self.tokens.extra.get("comments_total")
+            return views, likes, (None if c is None else int(c)), n
+        covered  = [i for i in ids if i in wall]
+        comments = sum(wall[i] for i in covered) if covered else None
+        return views, likes, comments, n
 
 
 class VKClipsProvider(_VKBase):

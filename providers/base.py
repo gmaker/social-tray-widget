@@ -11,9 +11,14 @@ and `Metrics`. Adding a new platform means dropping one file in this folder.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
+
+# Consecutive walks that must agree on "no fewer items, fewer views" before
+# the drop is believed — see stale_strike().
+STALE_STRIKES = 2
 
 
 @dataclass
@@ -86,3 +91,52 @@ class Provider(ABC):
     @abstractmethod
     def fetch(self) -> Metrics:
         """Return a fresh snapshot. May raise — the widget guards every call."""
+
+
+def stale_strike(log: logging.Logger, extra: dict, label: str,
+                 n: int, views: int) -> int:
+    """Stale-read guard for a views total summed over a walk of items.
+
+    Platforms serve per-item counters from eventually consistent replicas. VK
+    now and then answers a whole walk with old, much lower numbers (seen live:
+    the same 17 videos summing 26,293 one call, 98,360 the next); YouTube's
+    per-video viewCount jitters by a few views between calls seconds apart
+    (804, 801, 804...), so a quiet-night walk can land a handful below the
+    previous one. A summed total rarely falls for real without an item
+    disappearing — which also lowers the item count — so "no fewer items,
+    fewer views" is stale data... unless a delete-and-repost hid inside one
+    refresh window, or the platform corrected a counter (YouTube strips views
+    it deems invalid): same count, views down for good. A stale VK replica is
+    gone by the next scheduled walk, a deletion is not, so the drop is
+    believed once STALE_STRIKES consecutive walks show it. YouTube's jitter is
+    an independent draw per read, so there a low read CAN repeat and is then
+    accepted as real: the hold removes the single low read, the common case,
+    and the residue is a few views that the next growth overtakes — a bounded
+    miss, chosen over a guard that could sit on a real drop for good. Likes
+    and comments are not guarded (likes fall for real on an un-like, comments
+    when one is deleted); a held pass keeps the cached likes and comments
+    too, since all three sums come from one walk.
+
+    `extra` is the provider's cached walk state: views_total and items_count
+    as written by its last accepted walk, stale_strikes as left by the last
+    held one (0 after an accepted walk). Returns the strike number to record
+    when this walk must be HELD: the caller keeps its cached totals and
+    stamps the pass as done (or the walk would re-run on every poll).
+    Returns 0 when the walk is to be accepted; the caller then records
+    views_total, items_count and stale_strikes=0 together.
+    """
+    prev_n = extra.get("items_count")
+    if prev_n is None or "views_total" not in extra:
+        return 0                       # first guarded walk: nothing to compare
+    prev_views = int(extra["views_total"])
+    if n < int(prev_n) or views >= prev_views:
+        return 0
+    strikes = int(extra.get("stale_strikes", 0)) + 1
+    if strikes < STALE_STRIKES:
+        log.warning("%s: walk returned %d items but views fell %d -> %d; "
+                    "stale replica (%d/%d), keeping cached totals",
+                    label, n, prev_views, views, strikes, STALE_STRIKES)
+        return strikes
+    log.warning("%s: views still %d -> %d over %d items on walk %d; "
+                "a real drop, accepting", label, prev_views, views, n, strikes)
+    return 0
