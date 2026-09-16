@@ -23,12 +23,13 @@ dashboard is never needed again.
 Metrics:
   * followers -> /me?fields=followers_count      one call, exact
   * likes     -> `like_count` summed over /me/media
+  * comments  -> `comments_count` summed over /me/media
   * views     -> lifetime `views` insight, summed over every post
 
-Likes ride along on the media listing for free. Views don't: the media node
-documents `view_count` / `total_views_count`, but this product returns neither —
-it answers 200 and silently omits them — so views come from /insights, which
-needs the `instagram_business_manage_insights` scope. That would be one call per
+Likes and comments ride along on the media listing for free. Views don't: the
+media node documents `view_count` / `total_views_count`, but this product
+returns neither — it answers 200 and silently omits them — so views come from
+/insights, which needs the `instagram_business_manage_insights` scope. That would be one call per
 post, except the `?ids=` multi-read works here and takes 50 at a time, so a
 50-post account costs one call, not fifty.
 
@@ -38,8 +39,8 @@ the only part of a poll costing more than one call.
 
 Config (settings.json -> providers.instagram):
     "setup_token":       dashboard token, adopted on first run and cleared
-    "count_views":       default true; false keeps likes but skips the insights
-                         calls, leaving views at 0
+    "count_views":       default true; false keeps likes and comments but
+                         skips the insights calls, leaving views at 0
     "views_refresh_min": default 15
 """
 
@@ -184,44 +185,52 @@ class InstagramProvider(Provider):
             log.error("instagram /me HTTP %s: %s", r.status_code, r.text[:500])
         r.raise_for_status()
         followers = int(r.json().get("followers_count", 0))
-        views, likes = self._totals()
-        return Metrics(followers=followers, views=views, likes=likes)
+        views, likes, comments = self._totals()
+        return Metrics(followers=followers, views=views, likes=likes,
+                       comments=comments)
 
     def _totals(self) -> tuple:
-        """(views, likes) across every post, re-read at most every
+        """(views, likes, comments) across every post, re-read at most every
         `views_refresh_min` minutes and cached in the token file between runs."""
         extra  = self.tokens.extra
-        cached = int(extra.get("views_total", 0)), int(extra.get("likes_total", 0))
+        # A token file from before comments were counted has no comments_total:
+        # its views/likes cache still serves on a failed pass (comments dash),
+        # but it doesn't count as fresh — walk now rather than wait it out.
+        has_comments = "comments_total" in extra
+        cached = (int(extra.get("views_total", 0)), int(extra.get("likes_total", 0)),
+                  int(extra["comments_total"]) if has_comments else None)
         every  = int(self.config.get("views_refresh_min", 15)) * 60
-        if time.time() < extra.get("totals_at", 0) + every:
+        if has_comments and time.time() < extra.get("totals_at", 0) + every:
             return cached
         try:
-            views, likes = self._sum_media()
+            views, likes, comments = self._sum_media()
         except Exception:
             # These are the secondary numbers; don't lose the follower count
             # over them. The next poll retries.
             log.exception("instagram: media pass failed, reusing cached totals")
             return cached
-        self.tokens.set_extra("views_total", views)
-        self.tokens.set_extra("likes_total", likes)
-        self.tokens.set_extra("totals_at", time.time())
-        return views, likes
+        # One write: the sums and their timestamp belong together.
+        self.tokens.update_extra({"views_total": views, "likes_total": likes,
+                                  "comments_total": comments,
+                                  "totals_at": time.time()})
+        return views, likes, comments
 
     def _sum_media(self) -> tuple:
-        nodes = self._media()
-        likes = sum(int(node.get("like_count") or 0) for node in nodes)
+        nodes    = self._media()
+        likes    = sum(int(node.get("like_count") or 0) for node in nodes)
+        comments = sum(int(node.get("comments_count") or 0) for node in nodes)
         if not self.config.get("count_views", True):
-            return 0, likes
+            return 0, likes, comments
         skip  = set(self.tokens.extra.get("no_insights") or [])
         ids   = [node["id"] for node in nodes if node["id"] not in skip]
         views = sum(self._views_of(ids[i:i + _PER_READ])
                     for i in range(0, len(ids), _PER_READ))
-        return views, likes
+        return views, likes, comments
 
     def _media(self) -> list:
         nodes  = []
         url    = _MEDIA
-        params = {"fields": "id,like_count", "limit": _PER_PAGE,
+        params = {"fields": "id,like_count,comments_count", "limit": _PER_PAGE,
                   "access_token": self.tokens.access_token}
         while url:
             r = requests.get(url, params=params, timeout=20)

@@ -1,6 +1,6 @@
 # Social Tray Widget
 
-A lightweight Windows system-tray widget that shows your **TikTok + YouTube + Instagram + Telegram + VK** followers, views, and likes side by side — right on the taskbar.
+A lightweight Windows system-tray widget that shows your **TikTok + YouTube + Instagram + Telegram + VK** followers, views, likes, and comments side by side — right on the taskbar.
 
 ![Screenshot](screenshots/screenshot.png)
 
@@ -11,7 +11,7 @@ Every platform is read through its **official API** — OAuth for TikTok, YouTub
 ## Features
 
 - Two tray icons: **Σ followers** · **Σ views** — click either for the detail popup
-- One table for every platform, plus totals: followers · views · likes
+- One table for every platform, plus totals: followers · likes · comments · views
 - **Deltas**: green `(+12)` / red `(-3)` next to every value, counting from the last time you acknowledged them. Click the popup to rebase — the deltas survive restarts
 - Flip-digit animation in the popup (Solari board style)
 - Sound notification on new followers (configurable WAV, mutable from the tray)
@@ -101,19 +101,20 @@ Posts made before the account switched to professional never report insights, so
 
 ## What exactly is counted
 
-| Row | Followers | Likes | Views |
-|---|---|---|---|
-| **TikTok** | account followers, exact | the account's total likes counter | plays summed over every video |
-| **YouTube** | subscribers (YouTube rounds the public number to 3 significant figures) | likes summed over every upload — Shorts and unlisted videos included | views summed over every upload — Shorts included, current within the walk's 15 min⁴ |
-| **Instagram** | followers, exact | likes summed over every post | lifetime views summed over every post's insights¹ |
-| **Telegram** | channel subscribers, exact | reactions summed over every post | views summed over every post |
-| **VK** | community members, exact | likes summed over every wall post | wall post *impressions* — how many times posts appeared in feeds² |
-| **VK Video** | shared with VK — one community, one number (the popup merges the cell) | likes summed over the long videos | plays summed over the long videos |
-| **VK Clips** | shared with VK | likes summed over every clip | plays summed over every clip³ |
+| Row | Followers | Likes | Comments | Views |
+|---|---|---|---|---|
+| **TikTok** | account followers, exact | the account's total likes counter | comments summed over every video | plays summed over every video |
+| **YouTube** | subscribers (YouTube rounds the public number to 3 significant figures) | likes summed over every upload — Shorts and unlisted videos included | comments summed over every upload (a video with comments turned off counts 0) | views summed over every upload — Shorts included, current within the walk's 15 min⁴ |
+| **Instagram** | followers, exact | likes summed over every post | comments summed over every post | lifetime views summed over every post's insights¹ |
+| **Telegram** | channel subscribers, exact | reactions summed over every post | replies summed over every post — the threads in the linked discussion group; a channel without one shows 0 | views summed over every post |
+| **VK** | community members, exact | likes summed over every wall post | comments summed over every wall post | wall post *impressions* — how many times posts appeared in feeds² |
+| **VK Video** | shared with VK — one community, one number (the popup merges the cell) | likes summed over the long videos | — (a service key never sees a long video's comment count⁵) | plays summed over the long videos |
+| **VK Clips** | shared with VK | likes summed over every clip | comments summed over every clip | plays summed over every clip³ |
 
 ¹ Instagram: posts published before the account became professional never report insights and are skipped; Stories are not included (their per-story stats die 24h after expiry, and the API offers no per-story history).
 ² VK's post counter is *feed impressions*, not video plays — the VK rows measure different things and never double-count.
 ³ **VK Clips** are the short vertical videos. The public API has no list method for them, so the widget discovers each clip's id by scanning the community's video-id neighbourhood and reads its stats one clips-only batch at a time (see the VK section). It needs at least one regular video to anchor the id space — a clip-only community can't be counted. Fold this row into VK Video from the tray (**Merge VK Video + Clips**) for one combined video number.
+⁵ VK Video: `video.get` returns no `comments` field for a long video under a service key — not in the listing, not by id, not with `extended=1`, on any community — and `video.getComments` refuses service keys outright (error 28). Clips and wall posts do report theirs, so only this row shows a dash.
 ⁴ YouTube: views are the per-video counters summed over the uploads walk, not the channel's `statistics.viewCount` — YouTube recomputes that aggregate with hours of lag (and, for Shorts, by a stricter method), so a fresh Short shows up there a day later, if fully at all. The sum excludes views of since-deleted videos, which the channel counter keeps forever; the channel counter remains the fallback when the walk is off.
 
 ---
@@ -129,6 +130,7 @@ Posts made before the account switched to professional never report insights, so
 | `color_subs` | `[57,135,229]` | RGB of the followers column and tray icon |
 | `color_views` | `[25,158,112]` | RGB of the views column and tray icon |
 | `color_likes` | `[201,133,0]` | RGB of the likes column |
+| `color_comments` | `[190,105,160]` | RGB of the comments column |
 | `merge_vkvideo_clips` | `false` | Show VK Clips as one row with VK Video (also toggleable from the tray menu) |
 
 Per platform, under `providers.<name>`:
@@ -147,9 +149,9 @@ Per platform, under `providers.<name>`:
 | `service_token` | vk, vkvideo, vkclips | — | Service key of any VK ID app; one key can serve all three rows |
 | `group` | vk, vkvideo, vkclips | — | Community screen name or numeric id (no minus) |
 | `count_views` | tiktok, instagram, telegram, vk, vkvideo, vkclips | `true` | Off = skip the views calls |
-| `views_refresh_min` | instagram, telegram, vk, vkvideo, vkclips | `15` | Minutes between views/likes passes |
-| `count_likes` | youtube | `true` | Off = skip the uploads walk (likes go dash, views fall back to the channel counter) |
-| `likes_refresh_min` | youtube | `15` | Minutes between uploads-walk passes (views + likes) |
+| `views_refresh_min` | instagram, telegram, vk, vkvideo, vkclips | `15` | Minutes between views/likes/comments passes |
+| `count_likes` | youtube | `true` | Off = skip the uploads walk (likes and comments go dash, views fall back to the channel counter) |
+| `likes_refresh_min` | youtube | `15` | Minutes between uploads-walk passes (views + likes + comments) |
 
 ---
 
@@ -158,7 +160,7 @@ Per platform, under `providers.<name>`:
 Right-click either tray icon:
 
 - **Platforms** — enable/disable each source (saved to `settings.json`)
-- **Show** — toggle the likes/views columns (followers stay pinned)
+- **Show** — toggle the likes/comments/views columns (followers stay pinned)
 - **Merge VK Video + Clips** — one combined video row (shown only when both are enabled)
 - **Refresh now** — poll immediately
 - **Sound: ON/OFF** — mute the follower sound
@@ -168,9 +170,9 @@ Right-click either tray icon:
 
 ## How it stays inside the rate limits
 
-Followers cost one call per platform and stay live at `poll_interval`. Views and likes are the expensive ones, so each is cached for `views_refresh_min` / `likes_refresh_min` minutes:
+Followers cost one call per platform and stay live at `poll_interval`. Views, likes and comments are the expensive ones — comments ride the same walks as likes, no extra calls — so each is cached for `views_refresh_min` / `likes_refresh_min` minutes:
 
-- **YouTube** has no channel-level like total — and its channel-level view total lags by hours — so both come from walking the uploads playlist 50 videos at a time: `2 × ceil(uploads / 50)` units of the 10,000/day quota per pass, views and likes out of the same call. Beware that `statistics.videoCount` counts only *public* videos and understates this badly: a channel reporting 133 can hold 300+ items in its uploads playlist. Once a minute that alone would exhaust the quota; every 15 minutes it lands near a quarter of it.
+- **YouTube** has no channel-level like total — and its channel-level view total lags by hours — so both come from walking the uploads playlist 50 videos at a time: `2 × ceil(uploads / 50)` units of the 10,000/day quota per pass, views, likes and comments out of the same call. Beware that `statistics.videoCount` counts only *public* videos and understates this badly: a channel reporting 133 can hold 300+ items in its uploads playlist. Once a minute that alone would exhaust the quota; every 15 minutes it lands near a quarter of it.
 - **Instagram**'s limit is `4800 × impressions per 24h`, so a quiet account has a small budget. Views come from `/insights` (the documented `view_count` field on the media node is silently omitted by this product), batched 50 posts per call via `?ids=`. A pass costs 2 calls, not 50.
 - **Telegram** views and reactions mean walking the channel history. The recent tail (the last ~500 posts) is re-read every pass so a fresh post's views stay live as they climb; older posts, whose counts have settled, are summed once and frozen, capping the walk at ~the tail length however long the history is. Once a day the frozen part is recomputed to absorb deletions and any late growth.
 - **VK / VK Video / VK Clips** walk 100 items per request under the service key's 5 rps; all three are cached for `views_refresh_min` minutes, so a poll normally costs one `groups.getById`. VK Clips adds a `clips_count` check and, only when it changes, a short id-scan; a full re-scan happens just once, at first run. The historical (now undocumented) `wall.get` quota of ~5000 calls/day only matters past several thousand posts.
@@ -184,7 +186,7 @@ The palette is validated, not eyeballed: every colour sits inside the OKLCH ligh
 
 # Social Tray Widget (на русском)
 
-Лёгкий виджет для системного трея Windows: показывает **TikTok + YouTube + Instagram + Telegram + VK** — подписчиков, просмотры и лайки — рядом, прямо на панели задач.
+Лёгкий виджет для системного трея Windows: показывает **TikTok + YouTube + Instagram + Telegram + VK** — подписчиков, просмотры, лайки и комментарии — рядом, прямо на панели задач.
 
 ![Скриншот](screenshots/screenshot.png)
 
@@ -195,7 +197,7 @@ The palette is validated, not eyeballed: every colour sits inside the OKLCH ligh
 ## Возможности
 
 - Две иконки в трее: **Σ подписчики** · **Σ просмотры** — клик открывает попап
-- Одна таблица на все платформы плюс итоги: подписчики · просмотры · лайки
+- Одна таблица на все платформы плюс итоги: подписчики · лайки · комментарии · просмотры
 - **Дельты**: зелёное `(+12)` / красное `(-3)` рядом с каждым числом, считаются с момента последнего подтверждения. Клик по попапу перебазирует; дельты переживают перезапуск
 - Анимация цифр в стиле табло Solari
 - Звук при новых подписчиках (настраиваемый WAV, мьютится из трея)
@@ -285,19 +287,20 @@ Bot API не отдаёт ни просмотры постов, ни реакц�
 
 ## Что именно считается
 
-| Строка | Подписчики | Лайки | Просмотры |
-|---|---|---|---|
-| **TikTok** | подписчики аккаунта, точно | суммарный счётчик лайков аккаунта | проигрывания, сумма по всем видео |
-| **YouTube** | подписчики (YouTube округляет публичное число до 3 значащих цифр) | сумма лайков всех загрузок — включая Shorts и непубличные ролики | сумма просмотров всех загрузок — включая Shorts, свежие в пределах 15-минутного обхода⁴ |
-| **Instagram** | подписчики, точно | сумма лайков всех постов | сумма lifetime-просмотров постов из insights¹ |
-| **Telegram** | подписчики канала, точно | сумма реакций всех постов | сумма просмотров всех постов |
-| **VK** | участники сообщества, точно | сумма лайков постов стены | *показы* постов стены — сколько раз посты мелькнули в лентах² |
-| **VK Video** | общие с VK — сообщество одно, число одно (в попапе ячейка объединена) | сумма лайков длинных роликов | проигрывания длинных роликов |
-| **VK Clips** | общие с VK | сумма лайков всех клипов | проигрывания всех клипов³ |
+| Строка | Подписчики | Лайки | Комментарии | Просмотры |
+|---|---|---|---|---|
+| **TikTok** | подписчики аккаунта, точно | суммарный счётчик лайков аккаунта | сумма комментариев по всем видео | проигрывания, сумма по всем видео |
+| **YouTube** | подписчики (YouTube округляет публичное число до 3 значащих цифр) | сумма лайков всех загрузок — включая Shorts и непубличные ролики | сумма комментариев всех загрузок (ролик с выключенными комментариями даёт 0) | сумма просмотров всех загрузок — включая Shorts, свежие в пределах 15-минутного обхода⁴ |
+| **Instagram** | подписчики, точно | сумма лайков всех постов | сумма комментариев всех постов | сумма lifetime-просмотров постов из insights¹ |
+| **Telegram** | подписчики канала, точно | сумма реакций всех постов | сумма ответов под всеми постами — треды в привязанной группе обсуждений; без неё 0 | сумма просмотров всех постов |
+| **VK** | участники сообщества, точно | сумма лайков постов стены | сумма комментариев постов стены | *показы* постов стены — сколько раз посты мелькнули в лентах² |
+| **VK Video** | общие с VK — сообщество одно, число одно (в попапе ячейка объединена) | сумма лайков длинных роликов | — (сервисный ключ не видит комментарии длинных роликов⁵) | проигрывания длинных роликов |
+| **VK Clips** | общие с VK | сумма лайков всех клипов | сумма комментариев всех клипов | проигрывания всех клипов³ |
 
 ¹ Instagram: посты, опубликованные до перехода аккаунта на профессиональный, статистику не отдают и пропускаются; сторис не входят (их статистика умирает через 24 часа после истечения, истории по ним API не даёт).
 ² Счётчик постов VK — это *показы в ленте*, а не проигрывания видео: VK-строки меряют разное и никогда не задваиваются.
 ³ **VK Clips** — короткие вертикальные видео. Списочного метода для них в публичном API нет, поэтому виджет определяет id каждого клипа сканом соседних видео-id сообщества и читает статистику пачками только из клипов (см. раздел VK). Нужен хотя бы один обычный ролик, чтобы задать диапазон id — сообщество из одних клипов посчитать нельзя. Строку можно слить с VK Video через трей (**Merge VK Video + Clips**) в одно общее видео-число.
+⁵ VK Video: `video.get` под сервисным ключом не отдаёт поле `comments` у длинных роликов — ни в списке, ни по id, ни с `extended=1`, ни у какого сообщества, — а `video.getComments` сервисный ключ отвергает сразу (ошибка 28). Клипы и посты стены свои комментарии отдают, поэтому прочерк только в этой строке.
 ⁴ YouTube: просмотры — сумма per-video счётчиков по обходу загрузок, а не канальный `statistics.viewCount`: этот агрегат YouTube пересчитывает с лагом в часы (а Shorts — по более строгой методике), и свежий шортс попадает туда через сутки, если попадает целиком. В сумму не входят просмотры удалённых видео, которые в канальном счётчике остаются навсегда; канальный счётчик остаётся запасным, когда обход выключен.
 
 ---
@@ -313,6 +316,7 @@ Bot API не отдаёт ни просмотры постов, ни реакц�
 | `color_subs` | `[57,135,229]` | RGB колонки подписчиков и иконки в трее |
 | `color_views` | `[25,158,112]` | RGB колонки просмотров и иконки в трее |
 | `color_likes` | `[201,133,0]` | RGB колонки лайков |
+| `color_comments` | `[190,105,160]` | RGB колонки комментариев |
 | `merge_vkvideo_clips` | `false` | Показывать VK Clips одной строкой с VK Video (переключается и из меню трея) |
 
 По платформам, в секции `providers.<имя>`:
@@ -331,9 +335,9 @@ Bot API не отдаёт ни просмотры постов, ни реакц�
 | `service_token` | vk, vkvideo, vkclips | — | Сервисный ключ любого приложения VK ID; один ключ на все три строки |
 | `group` | vk, vkvideo, vkclips | — | Короткое имя сообщества или числовой id (без минуса) |
 | `count_views` | tiktok, instagram, telegram, vk, vkvideo, vkclips | `true` | Выкл = не запрашивать просмотры |
-| `views_refresh_min` | instagram, telegram, vk, vkvideo, vkclips | `15` | Минуты между проходами за просмотрами/лайками |
-| `count_likes` | youtube | `true` | Выкл = не обходить плейлист загрузок (лайки прочерком, просмотры — из канального счётчика) |
-| `likes_refresh_min` | youtube | `15` | Минуты между проходами обхода загрузок (просмотры + лайки) |
+| `views_refresh_min` | instagram, telegram, vk, vkvideo, vkclips | `15` | Минуты между проходами за просмотрами/лайками/комментариями |
+| `count_likes` | youtube | `true` | Выкл = не обходить плейлист загрузок (лайки и комментарии прочерком, просмотры — из канального счётчика) |
+| `likes_refresh_min` | youtube | `15` | Минуты между проходами обхода загрузок (просмотры + лайки + комментарии) |
 
 ---
 
@@ -342,7 +346,7 @@ Bot API не отдаёт ни просмотры постов, ни реакц�
 Правой кнопкой по любой иконке:
 
 - **Platforms** — включить/выключить источник (сохраняется в `settings.json`)
-- **Show** — скрыть/показать колонки лайков и просмотров (подписчики всегда видны)
+- **Show** — скрыть/показать колонки лайков, комментариев и просмотров (подписчики всегда видны)
 - **Merge VK Video + Clips** — одна общая видео-строка (виден, только когда включены обе)
 - **Refresh now** — обновить немедленно
 - **Sound: ON/OFF** — мьют звука подписчиков
@@ -352,9 +356,9 @@ Bot API не отдаёт ни просмотры постов, ни реакц�
 
 ## Как виджет укладывается в лимиты
 
-Подписчики стоят один запрос на платформу и обновляются живьём каждый `poll_interval`. Просмотры и лайки — дорогие, поэтому кэшируются на `views_refresh_min` / `likes_refresh_min` минут:
+Подписчики стоят один запрос на платформу и обновляются живьём каждый `poll_interval`. Просмотры, лайки и комментарии — дорогие (комментарии едут теми же обходами, что и лайки, без лишних запросов), поэтому кэшируются на `views_refresh_min` / `likes_refresh_min` минут:
 
-- **У YouTube** нет суммы лайков на уровне канала — а канальная сумма просмотров отстаёт на часы — поэтому и то и другое берётся обходом плейлиста загрузок по 50 видео: `2 × ceil(загрузок / 50)` единиц квоты (10 000/сутки) за проход, просмотры и лайки из одного запроса. Осторожно: `statistics.videoCount` считает только **публичные** видео и сильно занижает картину — канал, показывающий 133, легко держит 300+ элементов в плейлисте загрузок. Раз в минуту это выело бы всю квоту в одиночку; раз в 15 минут — около четверти.
+- **У YouTube** нет суммы лайков на уровне канала — а канальная сумма просмотров отстаёт на часы — поэтому и то и другое берётся обходом плейлиста загрузок по 50 видео: `2 × ceil(загрузок / 50)` единиц квоты (10 000/сутки) за проход, просмотры, лайки и комментарии из одного запроса. Осторожно: `statistics.videoCount` считает только **публичные** видео и сильно занижает картину — канал, показывающий 133, легко держит 300+ элементов в плейлисте загрузок. Раз в минуту это выело бы всю квоту в одиночку; раз в 15 минут — около четверти.
 - **У Instagram** лимит `4800 × показы за 24 часа`, так что у тихого аккаунта бюджет маленький. Просмотры берутся из `/insights` (задокументированное поле `view_count` у media-ноды этот продукт молча не возвращает), пачками по 50 постов через `?ids=`. Проход стоит 2 запроса, а не 50.
 - **У Telegram** просмотры и реакции — это обход истории канала. Свежий хвост (последние ~500 постов) перечитывается каждый проход, чтобы просмотры нового поста росли вживую; более старые посты, у которых счётчики уже устоялись, суммируются один раз и замораживаются — обход ограничен длиной хвоста, какой бы длинной ни была история. Раз в сутки замороженная часть пересчитывается, чтобы учесть удаления и запоздалый рост.
 - **VK / ВК Видео / VK Clips** обходятся по 100 элементов за запрос при лимите сервисного ключа 5 запросов/сек; все три кэшируются на `views_refresh_min` минут, так что обычный опрос стоит один `groups.getById`. VK Clips добавляет проверку `clips_count` и, только при её изменении, короткий скан id; полный скан бывает лишь один раз, при первом запуске. Историческая (ныне недокументированная) квота `wall.get` ~5000 вызовов/сутки начинает мешать только после нескольких тысяч постов.

@@ -17,13 +17,16 @@ DEFAULTS: dict = {
     "sound_enabled":   True,
     "sound_volume":    1.0,
     "sound_followers": "snd/2.wav",      # relative to this package dir
-    # Accents for the two tray icons and the popup's likes total. Every colour
-    # in this file is validated against the popup's #141414 surface: inside the
-    # OKLCH dark lightness band (0.48-0.67), above the chroma floor, over 3:1
-    # contrast, and pairwise distinct under protanopia/deuteranopia.
+    # Accents for the two tray icons and the popup's likes/comments columns.
+    # Every colour in this file is validated against the popup's #141414
+    # surface: inside the OKLCH dark lightness band (0.48-0.67), above the
+    # chroma floor, over 3:1 contrast, and pairwise distinct under
+    # protanopia/deuteranopia.
     "color_subs":      [57, 135, 229],   # blue
     "color_views":     [25, 158, 112],   # aqua
     "color_likes":     [201, 133, 0],    # amber
+    "color_comments":  [190, 105, 160],  # rose — the Okabe-Ito reddish purple,
+                                         # darkened into the band
     # Fold the VK Clips row into VK Video (one combined video number). Off by
     # default — the two rows show separately; toggle it from the tray menu.
     "merge_vkvideo_clips": False,

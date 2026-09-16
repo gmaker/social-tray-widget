@@ -6,12 +6,15 @@ row reports followers=None (a dash) — the community's members are already
 counted by the wall row.
 
   * VKProvider       followers = community members (groups.getById, exact)
-                     likes / views = summed over wall posts (wall.get)
+                     likes / views / comments = summed over wall posts (wall.get)
   * VKVideoProvider  followers = None (same community — never counted twice)
                      likes / views = summed over the long videos (video.get)
+                     comments = None: a service key never sees a long video's
+                     comment count (see `counts_comments`)
   * VKClipsProvider  followers = None (same community again)
-                     likes / views = summed over the community's clips, which
-                     the public API exposes only by explicit id (see below)
+                     likes / views / comments = summed over the community's
+                     clips, which the public API exposes only by explicit id
+                     (see below)
 
 Auth is a *service key* from any VK ID app (dev.vk.com -> Приложения ->
 Создать приложение; the key is in the app's settings). No OAuth, no expiry,
@@ -50,7 +53,8 @@ video to anchor the id space; a clip-only community can't be bootstrapped.
 Config (settings.json -> providers.vk / providers.vkvideo / providers.vkclips):
     "service_token":     the service key; the same one can serve all rows
     "group":             community screen name or numeric id (no minus)
-    "count_views":       default true; false skips the walk, likes go dash
+    "count_views":       default true; false skips the walk, likes and
+                         comments go dash
     "views_refresh_min": default 15
 """
 
@@ -121,6 +125,16 @@ def _call(token: str, method: str, **params) -> dict:
 class _VKBase(Provider):
     """Shared plumbing: config access, auth check, cached summation walks."""
 
+    # Whether the walk can count comments. Wall posts carry comments.count and
+    # clips (video.get by explicit id, type=short_video) a bare `comments` —
+    # but a LONG video never does under a service key: not in the owner
+    # listing, not by id, not with extended=1, on any community (verified
+    # 2026-09-16 on communities with thousands of visibly commented videos),
+    # and video.getComments is refused outright (error 28, "method is
+    # unavailable with service token"). A row that can't count reports None,
+    # which the popup draws as a dash — never a plausible 0.
+    counts_comments = True
+
     def _token(self) -> str:
         return str(self.config.get("service_token") or "").strip()
 
@@ -164,8 +178,9 @@ class _VKBase(Provider):
         extra = self.tokens.extra
         prev  = str(extra.get("group_id") or "")
         if prev and prev != gid:
-            for k in ("totals_at", "views_total", "likes_total", "clip_ids",
-                      "items_count", "stale_strikes"):
+            for k in ("totals_at", "views_total", "likes_total",
+                      "comments_total", "clip_ids", "items_count",
+                      "stale_strikes"):
                 extra.pop(k, None)
         if prev != gid:
             self.tokens.set_extra("group_id", gid)
@@ -183,20 +198,32 @@ class _VKBase(Provider):
         return int(g["members_count"])
 
     def _totals(self) -> tuple:
-        """(views, likes) via the subclass's `_walk_page`, re-read at most every
-        `views_refresh_min` minutes and cached in the token file between runs."""
+        """(views, likes, comments) via the subclass's `_walk_page`, re-read at
+        most every `views_refresh_min` minutes and cached in the token file
+        between runs."""
         if not self.config.get("count_views", True):
-            return 0, None
+            return 0, None, None
         extra  = self.tokens.extra
         walked = "totals_at" in extra
+        # A token file from before comments were counted: its views/likes still
+        # serve when a walk fails (comments dash), but it isn't fresh — walk now.
+        has_comments = "comments_total" in extra   # may be cached as None
+        # The flag wins over the cache too: a row that can't count never
+        # serves a number, whatever an older token file has in it.
+        cached_c = (None if not self.counts_comments
+                    or extra.get("comments_total") is None
+                    else int(extra["comments_total"]))
         cached = ((int(extra.get("views_total", 0)),
-                   int(extra.get("likes_total", 0)))
-                  if walked else (0, None))   # dash until a walk succeeded
+                   int(extra.get("likes_total", 0)), cached_c)
+                  if walked else (0, None, None))   # dash until a walk succeeded
         every  = int(self.config.get("views_refresh_min", 15)) * 60
-        if walked and time.time() < extra.get("totals_at", 0) + every:
+        if (walked and has_comments
+                and time.time() < extra.get("totals_at", 0) + every):
             return cached
         try:
-            views, likes, n = self._compute_totals()
+            views, likes, comments, n = self._compute_totals()
+            if not self.counts_comments:
+                comments = None
         except VKError as exc:
             if exc.code not in _THROTTLE_CODES:
                 raise
@@ -240,29 +267,32 @@ class _VKBase(Provider):
                         int(extra.get("views_total", 0)), views, n, strikes)
         # One write: the sums, their item count and timestamp belong together.
         self.tokens.update_extra({"views_total": views, "likes_total": likes,
+                                  "comments_total": comments,
                                   "items_count": n, "totals_at": time.time(),
                                   "stale_strikes": 0})
-        return views, likes
+        return views, likes, comments
 
     def _compute_totals(self) -> tuple:
-        """(views, likes, items summed). Default: page the owner's items
-        through `_walk_page`; overridden where the totals come from an explicit
-        id list (clips have no list method)."""
-        views = likes = offset = n = 0
+        """(views, likes, comments, items summed). Default: page the owner's
+        items through `_walk_page`; overridden where the totals come from an
+        explicit id list (clips have no list method)."""
+        views = likes = comments = offset = n = 0
         total = None                  # real bound learned from the first page
         while total is None or offset < total:
             items, total = self._walk_page(offset)
-            for v, l in items:
-                views += v
-                likes += l
+            for v, l, c in items:
+                views    += v
+                likes    += l
+                comments += c
             n += len(items)
             # Hidden items make pages short or even empty — the response's
             # total count is the bound, not the page contents.
             offset += _PER_PAGE
-        return views, likes, n
+        return views, likes, comments, n
 
     def _walk_page(self, offset: int) -> tuple:
-        """One page of (views, likes) pairs plus the response's total count."""
+        """One page of (views, likes, comments) triples plus the response's
+        total count."""
         raise NotImplementedError
 
 
@@ -273,16 +303,18 @@ class VKProvider(_VKBase):
 
     def fetch(self) -> Metrics:
         self._group_id()   # re-resolves (and re-walks) if `group` was re-pointed
-        followers    = self._members()
-        views, likes = self._totals()
-        return Metrics(followers=followers, views=views, likes=likes)
+        followers = self._members()
+        views, likes, comments = self._totals()
+        return Metrics(followers=followers, views=views, likes=likes,
+                       comments=comments)
 
     def _walk_page(self, offset: int) -> tuple:
         resp = _call(self._token(), "wall.get",
                      owner_id=f"-{self._group_id()}",
                      count=_PER_PAGE, offset=offset)
         return ([((p.get("views") or {}).get("count", 0),
-                  (p.get("likes") or {}).get("count", 0))
+                  (p.get("likes") or {}).get("count", 0),
+                  (p.get("comments") or {}).get("count", 0))
                  for p in resp.get("items", [])],
                 int(resp.get("count", 0)))
 
@@ -294,20 +326,24 @@ class VKVideoProvider(_VKBase):
     default_color = (122, 133, 255)
     # One community, two rows: the popup centres VK's followers cell over both.
     followers_span_with = "vk"
+    counts_comments     = False   # dash — see _VKBase.counts_comments
 
     def fetch(self) -> Metrics:
         self._group_id()   # re-resolves (and re-walks) if `group` was re-pointed
-        views, likes = self._totals()
+        views, likes, comments = self._totals()
         # followers=None on purpose: the backing community's members already
         # count on the VK row; a second copy would double the tray total.
-        return Metrics(followers=None, views=views, likes=likes)
+        return Metrics(followers=None, views=views, likes=likes,
+                       comments=comments)
 
     def _walk_page(self, offset: int) -> tuple:
         resp = _call(self._token(), "video.get",
                      owner_id=f"-{self._group_id()}",
                      count=_PER_PAGE, offset=offset)
+        # No comment count here — see `counts_comments`; the 0 is a
+        # placeholder _totals turns into None.
         return ([(int(v.get("views") or 0),
-                  (v.get("likes") or {}).get("count", 0))
+                  (v.get("likes") or {}).get("count", 0), 0)
                  for v in resp.get("items", [])],
                 int(resp.get("count", 0)))
 
@@ -325,14 +361,15 @@ class VKClipsProvider(_VKBase):
 
     def fetch(self) -> Metrics:
         self._group_id()   # re-resolves (and drops stale totals) on a re-point
-        views, likes = self._totals()
-        return Metrics(followers=None, views=views, likes=likes)
+        views, likes, comments = self._totals()
+        return Metrics(followers=None, views=views, likes=likes,
+                       comments=comments)
 
     def _compute_totals(self) -> tuple:
         owner  = f"-{self._group_id()}"
         target = self._clips_count()
         ids    = [int(i) for i in (self.tokens.extra.get("clip_ids") or [])]
-        views, likes, live = self._clip_stats(owner, ids)
+        views, likes, comments, live = self._clip_stats(owner, ids)
         if len(live) < target:
             # A new clip — or one that was transiently absent last pass.
             # Rescan for more ids and re-stat the UNION of the cache and the
@@ -341,10 +378,10 @@ class VKClipsProvider(_VKBase):
             # still prune — _clip_stats omits anything that comes back absent.
             found = self._scan_clips(owner, target)
             if found:
-                views, likes, live = self._clip_stats(
+                views, likes, comments, live = self._clip_stats(
                     owner, sorted(set(ids) | found))
         self.tokens.set_extra("clip_ids", sorted(live))
-        return views, likes, len(live)
+        return views, likes, comments, len(live)
 
     def _clips_count(self) -> int:
         resp = _call(self._token(), "groups.getById",
@@ -357,10 +394,11 @@ class VKClipsProvider(_VKBase):
         return int(g["clips_count"])
 
     def _clip_stats(self, owner: str, ids: list) -> tuple:
-        """Sum (views, likes) over a PURE clip-id list and return the set of ids
-        that came back as real objects. Deleted/unknown ids are simply absent;
-        never mix a regular-video id in here — it zeroes every clip."""
-        views = likes = 0
+        """Sum (views, likes, comments) over a PURE clip-id list and return the
+        set of ids that came back as real objects. Deleted/unknown ids are
+        simply absent; never mix a regular-video id in here — it zeroes every
+        clip."""
+        views = likes = comments = 0
         live  = set()
         for i in range(0, len(ids), _CLIP_CHUNK):
             videos = ",".join(f"{owner}_{c}" for c in ids[i:i + _CLIP_CHUNK])
@@ -369,9 +407,10 @@ class VKClipsProvider(_VKBase):
                 if _is_stub(o):        # only if purity was violated — skip it
                     continue
                 live.add(int(o["id"]))
-                views += int(o.get("views") or 0)
-                likes += int((o.get("likes") or {}).get("count", 0))
-        return views, likes, live
+                views    += int(o.get("views") or 0)
+                likes    += int((o.get("likes") or {}).get("count", 0))
+                comments += int(o.get("comments") or 0)
+        return views, likes, comments, live
 
     def _scan_clips(self, owner: str, target: int) -> set:
         """Find clip ids by scanning the community's video-id neighbourhood for

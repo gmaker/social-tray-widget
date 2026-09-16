@@ -43,11 +43,14 @@ _DELTA_UP   = "#4a9d5b"
 _DELTA_DOWN = "#f2645a"
 
 # The counters a row shows, in column order; also the keys in state.json.
-_METRICS = ("followers", "likes", "views")
+# Comments sit between likes and views: the two engagement counters together,
+# views — the biggest number — on the right edge where it has room to grow.
+_METRICS = ("followers", "likes", "comments", "views")
 
 # Column headers, keyed by metric. Followers is the anchor column and can never
-# be hidden; likes/views are toggled from the tray "Show" menu.
-_METRIC_LABELS = {"followers": "FLWRS", "likes": "LIKES", "views": "VIEWS"}
+# be hidden; likes/comments/views are toggled from the tray "Show" menu.
+_METRIC_LABELS = {"followers": "FLWRS", "likes": "LIKES", "comments": "CMNTS",
+                  "views": "VIEWS"}
 
 # Value font: the same face, size and weight as the platform names / TOTAL, so
 # the numbers read as one typographic family with their row labels instead of a
@@ -307,13 +310,14 @@ class SocialWidget:
         self.color_subs    = tuple(settings.get("color_subs",  [254, 44, 85]))
         self.color_views   = tuple(settings.get("color_views", [100, 210, 130]))
         self.color_likes   = tuple(settings.get("color_likes", [235, 170, 60]))
+        self.color_comments = tuple(settings.get("color_comments", [190, 105, 160]))
         self.sound_enabled = bool(settings.get("sound_enabled", True))
         self.sound_volume  = float(settings.get("sound_volume", 1.0))
         snd = str(settings.get("sound_followers", ""))
         self.sound_path = snd if os.path.isabs(snd) else os.path.normpath(os.path.join(PKG_DIR, snd))
 
-        # Which columns the popup renders. Followers is always in the set; likes
-        # and views are opt-in and remembered in settings.json.
+        # Which columns the popup renders. Followers is always in the set;
+        # likes, comments and views are opt-in and remembered in settings.json.
         self.visible = self._load_visible(settings)
 
         self._muted = False
@@ -372,16 +376,23 @@ class SocialWidget:
         return img
 
     def _totals(self):
+        """(followers, views, likes, comments) summed over the platforms that
+        are up."""
         # `followers` may be None for a deliberately follower-less row (see
         # Metrics); skip those rather than crashing the sum.
         subs  = sum(m.followers for m in self.metrics.values()
                     if m.ok and m.followers is not None)
         views = sum(m.views     for m in self.metrics.values() if m.ok)
-        # `likes` is optional per platform; sum whoever reports it, and stay None
-        # when nobody does so the row shows a dash instead of a bogus zero.
-        counted = [m.likes for m in self.metrics.values()
-                   if m.ok and m.likes is not None]
-        return subs, views, (sum(counted) if counted else None)
+        return (subs, views,
+                self._optional_total("likes"), self._optional_total("comments"))
+
+    def _optional_total(self, metric: str):
+        """Likes and comments are optional per platform: sum whoever reports
+        the counter, and stay None when nobody does so the TOTAL row shows a
+        dash instead of a bogus zero."""
+        counted = [getattr(m, metric) for m in self.metrics.values()
+                   if m.ok and getattr(m, metric, None) is not None]
+        return sum(counted) if counted else None
 
     def _trays(self):
         return [t for t in (self._tray_subs, self._tray_views) if t]
@@ -509,8 +520,9 @@ class SocialWidget:
 
     # ── rendering (UI thread) ───────────────────────────────────────────────
     def _refresh_ui(self):
-        # Likes live in the popup table only — the tray keeps its two icons.
-        subs, views, _ = self._totals()
+        # Likes and comments live in the popup table only — the tray keeps its
+        # two icons.
+        subs, views, _, _ = self._totals()
         if self._tray_subs:
             self._tray_subs.icon  = self._make_icon(self._fmt(subs), self.color_subs)
             self._tray_subs.title = f"Followers (total): {subs:,}"
@@ -699,6 +711,7 @@ class SocialWidget:
         """Each visible counter and its column colour, in display order."""
         colors = {"followers": self.color_subs,
                   "likes":     self.color_likes,
+                  "comments":  self.color_comments,
                   "views":     self.color_views}
         return [(m, colors[m]) for m in self._visible_metrics()]
 
@@ -812,9 +825,9 @@ class SocialWidget:
                 except Exception:
                     log.exception("popup row update failed")
 
-        subs, views, likes = self._totals()
+        subs, views, likes, comments = self._totals()
         for metric, total in (("followers", subs), ("likes", likes),
-                              ("views", views)):
+                              ("comments", comments), ("views", views)):
             cell = self._popup_totals.get(metric)
             if not cell:
                 continue
@@ -879,10 +892,10 @@ class SocialWidget:
         ]
 
         # Followers is the anchor column: always shown, greyed so it can't be
-        # unchecked. Likes/views toggle the popup's columns on and off.
+        # unchecked. Likes/comments/views toggle the popup's columns on and off.
         show_items = []
         for metric in _METRICS:
-            label = _METRIC_LABELS[metric].title()
+            label = metric.title()   # the menu has room for the full word
             if metric == "followers":
                 show_items.append(pystray.MenuItem(
                     label, lambda i, it: None,

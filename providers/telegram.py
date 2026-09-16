@@ -21,6 +21,8 @@ Metrics:
   * followers -> channels.GetFullChannel, one call, exact
   * views     -> `views` summed over every channel post
   * likes     -> reaction counts summed over every channel post
+  * comments  -> `replies` summed over every channel post — the thread in the
+                 linked discussion group; a channel without one reports 0
 
 The history walk is the expensive part, so it is bounded two ways. The recent
 tail — the last `_TAIL_IDS` message ids — is re-read in full on every pass, so
@@ -44,7 +46,7 @@ Config (settings.json -> providers.telegram):
                            its numeric -100... id and must be resolved once by
                            telegram_login.py while signed in as a member
     "count_views":         default true; false skips the history walk entirely,
-                           leaving views at 0 and likes as a dash
+                           leaving views at 0 and likes/comments as a dash
     "views_refresh_min":   default 15
     "proxy":               "" (default) follows the Windows system proxy when
                            one is enabled — some ISPs block MTProto's IPs
@@ -182,13 +184,14 @@ class TelegramProvider(Provider):
                     return Metrics(ok=False, error=f"flood wait {exc.seconds}s")
                 followers = int(cached)
 
-            views, likes = await self._totals(client)
-            return Metrics(followers=followers, views=views, likes=likes)
+            views, likes, comments = await self._totals(client)
+            return Metrics(followers=followers, views=views, likes=likes,
+                           comments=comments)
         finally:
             await client.disconnect()
 
     async def _totals(self, client) -> tuple:
-        """(views, likes) across every post, re-read at most every
+        """(views, likes, comments) across every post, re-read at most every
         `views_refresh_min` minutes and cached in the token file between runs.
 
         The recent tail (the last `_TAIL_IDS` message ids) is re-read in full
@@ -201,28 +204,35 @@ class TelegramProvider(Provider):
         from telethon.errors import FloodWaitError
 
         if not self.config.get("count_views", True):
-            return 0, None
+            return 0, None, None
         extra  = self.tokens.extra
         walked = "totals_at" in extra   # has any pass ever finished?
+        # A token file from before comments were counted: its views/likes still
+        # serve when a pass fails (comments dash), but it isn't fresh — walk
+        # now — and its frozen part has no comments in it, so re-baseline.
+        has_comments = "comments_total" in extra
         cached = ((int(extra.get("views_total", 0)),
-                   int(extra.get("likes_total", 0)))
-                  if walked else (0, None))   # dash, not a plausible zero
+                   int(extra.get("likes_total", 0)),
+                   int(extra["comments_total"]) if has_comments else None)
+                  if walked else (0, None, None))   # dash, not a plausible zero
         every  = int(self.config.get("views_refresh_min", 15)) * 60
-        if walked and time.time() < extra.get("totals_at", 0) + every:
+        if (walked and has_comments
+                and time.time() < extra.get("totals_at", 0) + every):
             return cached
 
         floor    = int(extra.get("frozen_below", 0))
         frozen_v = int(extra.get("frozen_views", 0))
         frozen_l = int(extra.get("frozen_likes", 0))
+        frozen_c = int(extra.get("frozen_comments", 0))
         # Re-read everything on the first pass and once a day, so deletions and
         # any late growth on now-frozen posts are absorbed.
-        rebaseline = (not walked
+        rebaseline = (not walked or not has_comments
                       or time.time() > extra.get("frozen_at", 0) + _FULL_WALK_EVERY)
         if rebaseline:
-            floor = frozen_v = frozen_l = 0
+            floor = frozen_v = frozen_l = frozen_c = 0
 
         new_floor = floor
-        tail_v = tail_l = add_v = add_l = 0
+        tail_v = tail_l = tail_c = add_v = add_l = add_c = 0
         first  = True
         try:
             # wait_time=0 keeps the bounded live tail snappy under the poll
@@ -239,12 +249,18 @@ class TelegramProvider(Provider):
                 reactions = getattr(msg, "reactions", None)
                 l = (sum(int(r.count) for r in reactions.results)
                      if reactions and reactions.results else 0)
+                # MessageReplies.replies is the discussion-thread size; the
+                # attribute is None on a channel with no linked group.
+                replies = getattr(msg, "replies", None)
+                c = int(getattr(replies, "replies", 0) or 0)
                 if msg.id <= new_floor:   # slid out of the live tail → freeze
                     add_v += v
                     add_l += l
+                    add_c += c
                 else:
                     tail_v += v
                     tail_l += l
+                    tail_c += c
         except FloodWaitError as exc:
             log.warning("telegram: flood wait %ss during history walk, "
                         "reusing cached totals", exc.seconds)
@@ -267,16 +283,20 @@ class TelegramProvider(Provider):
 
         frozen_v += add_v
         frozen_l += add_l
-        views = frozen_v + tail_v
-        likes = frozen_l + tail_l
+        frozen_c += add_c
+        views    = frozen_v + tail_v
+        likes    = frozen_l + tail_l
+        comments = frozen_c + tail_c
         # One write: the id boundary and its sums must never be observed apart
         # on disk (a crash between separate writes would silently under- or
         # over-count until the next daily rebaseline).
-        persist = {"frozen_below": new_floor,
-                   "frozen_views": frozen_v, "frozen_likes": frozen_l,
-                   "views_total":  views,    "likes_total":  likes,
-                   "totals_at":    time.time()}
+        persist = {"frozen_below":    new_floor,
+                   "frozen_views":    frozen_v, "frozen_likes":  frozen_l,
+                   "frozen_comments": frozen_c,
+                   "views_total":     views,    "likes_total":   likes,
+                   "comments_total":  comments,
+                   "totals_at":       time.time()}
         if rebaseline:
             persist["frozen_at"] = time.time()
         self.tokens.update_extra(persist)
-        return views, likes
+        return views, likes, comments

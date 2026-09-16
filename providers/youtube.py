@@ -1,5 +1,5 @@
 """YouTube provider — Google OAuth2. One channels.list call yields the
-subscriber count; views and likes are summed over every upload.
+subscriber count; views, likes and comments are summed over every upload.
 
 Setup: a Google Cloud project with the *YouTube Data API v3* enabled and an
 OAuth client of type "Web application" whose authorised redirect URI exactly
@@ -15,9 +15,9 @@ is an aggregate YouTube recomputes with hours of lag (and, for Shorts, by a
 stricter "engaged views" method), so a fresh Short sitting at a thousand
 views shows up there a day later — if fully at all. Per-video counts are
 current, so views ride the same uploads walk as likes: statistics carries
-both viewCount and likeCount, so the second number is free. The trade-off is
-that views of since-deleted videos, which the channel aggregate keeps for
-ever, drop out of the sum. The channel counter is still used as a fallback
+viewCount, likeCount and commentCount, so the other two numbers are free.
+The trade-off is that views of since-deleted videos, which the channel
+aggregate keeps for ever, drop out of the sum. The channel counter is still used as a fallback
 when the walk is off or has never succeeded.
 
 Quota, the reason the walk is cached: the daily budget is 10,000 units.
@@ -31,8 +31,9 @@ the channel to grow.
 Config (settings.json -> providers.youtube):
     "client_id" / "client_secret": required
     "count_likes":       default true; false skips the uploads walk entirely
-                         (likes go dash, views fall back to the channel counter)
-    "likes_refresh_min": default 15 — minutes between walk passes (views+likes)
+                         (likes and comments go dash, views fall back to the
+                         channel counter)
+    "likes_refresh_min": default 15 — minutes between walk passes
 """
 
 from __future__ import annotations
@@ -56,6 +57,9 @@ _VIDEOS    = "https://www.googleapis.com/youtube/v3/videos"
 _SCOPE     = "https://www.googleapis.com/auth/youtube.readonly"
 
 _PER_PAGE = 50    # playlistItems page size and the videos.list id cap
+
+# The walk's sums as cached in the token file, in (views, likes, comments) order.
+_CACHE_KEYS = ("views_total", "likes_total", "comments_total")
 
 
 class YouTubeProvider(Provider):
@@ -152,50 +156,59 @@ class YouTubeProvider(Provider):
         st = items[0].get("statistics", {})
         uploads = ((items[0].get("contentDetails") or {})
                    .get("relatedPlaylists") or {}).get("uploads", "")
-        views, likes = self._walk_totals(uploads, int(st.get("viewCount", 0)))
+        views, likes, comments = self._walk_totals(
+            uploads, int(st.get("viewCount", 0)))
         return Metrics(followers=int(st.get("subscriberCount", 0)),
-                       views=views, likes=likes)
+                       views=views, likes=likes, comments=comments)
 
     def _auth(self) -> dict:
         return {"Authorization": f"Bearer {self.tokens.access_token}"}
 
-    # ── uploads walk: views + likes ─────────────────────────────────────────
+    # ── uploads walk: views + likes + comments ──────────────────────────────
     def _walk_totals(self, uploads: str, channel_views: int) -> tuple:
-        """(views, likes) summed over every upload, refreshed at most every
-        `likes_refresh_min` minutes and cached in the token file between runs.
+        """(views, likes, comments) summed over every upload, refreshed at most
+        every `likes_refresh_min` minutes and cached in the token file between
+        runs.
 
         Per-video viewCount is current where the channel aggregate lags by
         hours, so views come from this walk too — same statistics call, no
         extra quota. When the walk is off, or nothing has been cached yet and
-        it fails, views fall back to the channel counter and likes to None
-        (a dash rather than a misleading zero).
+        it fails, views fall back to the channel counter and likes/comments to
+        None (a dash rather than a misleading zero).
         """
         if not self.config.get("count_likes", True) or not uploads:
-            return channel_views, None
+            return channel_views, None, None
         extra = self.tokens.extra
-        have  = "views_total" in extra and "likes_total" in extra
+        # A token file from before comments were counted lacks comments_total:
+        # not "have", so it walks once now instead of serving a cache with a
+        # hole in it.
+        have  = all(k in extra for k in _CACHE_KEYS)
         every = int(self.config.get("likes_refresh_min", 15)) * 60
         if have and time.time() < extra.get("walk_at", 0) + every:
-            return int(extra["views_total"]), int(extra["likes_total"])
+            return tuple(int(extra[k]) for k in _CACHE_KEYS)
         try:
-            views, likes = self._sum_uploads(uploads)
+            views, likes, comments = self._sum_uploads(uploads)
         except Exception:
             # The walk is the extra; never let it cost us the follower count.
             log.exception("youtube: uploads walk failed, reusing cached values")
             if have:
-                return int(extra["views_total"]), int(extra["likes_total"])
-            likes = extra.get("likes_total")   # pre-views_total token files
-            return channel_views, None if likes is None else int(likes)
-        # One write: the two sums and their timestamp belong together. Drop
-        # the pre-views-walk stamp so an upgraded token file doesn't keep it.
+                return tuple(int(extra[k]) for k in _CACHE_KEYS)
+            # Older token files: whatever partial cache they hold, dash the rest.
+            views = extra.get("views_total")
+            likes = extra.get("likes_total")
+            return (channel_views if views is None else int(views),
+                    None if likes is None else int(likes), None)
+        # One write: the sums and their timestamp belong together. Drop the
+        # pre-views-walk stamp so an upgraded token file doesn't keep it.
         self.tokens.extra.pop("likes_at", None)
         self.tokens.update_extra({"views_total": views, "likes_total": likes,
+                                  "comments_total": comments,
                                   "walk_at": time.time()})
-        return views, likes
+        return views, likes, comments
 
     def _sum_uploads(self, uploads: str) -> tuple:
         ids   = self._upload_ids(uploads)
-        views = likes = 0
+        views = likes = comments = 0
         for i in range(0, len(ids), _PER_PAGE):
             r = requests.get(_VIDEOS, params={
                 "part": "statistics", "id": ",".join(ids[i:i + _PER_PAGE]),
@@ -207,9 +220,11 @@ class YouTubeProvider(Provider):
             for item in r.json().get("items", []):
                 st = item.get("statistics") or {}
                 views += int(st.get("viewCount") or 0)
-                # likeCount is absent when the uploader hides it.
-                likes += int(st.get("likeCount") or 0)
-        return views, likes
+                # likeCount is absent when the uploader hides it, commentCount
+                # when comments are turned off for the video.
+                likes    += int(st.get("likeCount") or 0)
+                comments += int(st.get("commentCount") or 0)
+        return views, likes, comments
 
     def _upload_ids(self, uploads: str) -> list:
         ids, page = [], None

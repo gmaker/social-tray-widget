@@ -27,10 +27,15 @@ class Metrics:
     `followers` may be None for a row that deliberately reports no follower
     count (e.g. a second row of the same community, which would otherwise be
     counted twice in the tray total); the widget shows a dash.
+
+    `likes` and `comments` are None when the row can't report them — the walk
+    that sums them is off or has never succeeded — so the popup shows a dash
+    rather than a plausible zero.
     """
     followers: Optional[int] = 0
     views: int = 0
     likes: Optional[int] = None
+    comments: Optional[int] = None
     ok: bool = True
     error: str = ""
 

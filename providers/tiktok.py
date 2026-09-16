@@ -1,5 +1,6 @@
-"""TikTok provider — OAuth PKCE, follower/likes from user/info, views summed
-over video/list. Ported from the original single-file widget."""
+"""TikTok provider — OAuth PKCE, follower/likes from user/info, views and
+comments summed over video/list (user/info has no comment total). Ported from
+the original single-file widget."""
 
 from __future__ import annotations
 
@@ -121,15 +122,21 @@ class TikTokProvider(Provider):
         followers = int(user.get("follower_count", 0))
         likes     = int(user.get("likes_count", 0))
 
-        views = self._fetch_views() if self.config.get("count_views", True) else 0
-        return Metrics(followers=followers, views=views, likes=likes)
+        if self.config.get("count_views", True):
+            views, comments = self._walk_videos()
+        else:
+            views, comments = 0, None   # no walk, no comment count → a dash
+        return Metrics(followers=followers, views=views, likes=likes,
+                       comments=comments)
 
-    def _fetch_views(self) -> int:
-        total, cursor, has_more = 0, 0, True
+    def _walk_videos(self) -> tuple:
+        """(views, comments) summed over every video — one listing, both
+        counters come from the same fields."""
+        views, comments, cursor, has_more = 0, 0, 0, True
         while has_more:
             r = requests.post(
                 _VIDEOLIST,
-                params={"fields": "id,view_count"},
+                params={"fields": "id,view_count,comment_count"},
                 headers={"Authorization": f"Bearer {self.tokens.access_token}",
                          "Content-Type": "application/json"},
                 json={"max_count": 20, "cursor": cursor},
@@ -140,7 +147,8 @@ class TikTokProvider(Provider):
             r.raise_for_status()
             data = r.json().get("data", {})
             for v in data.get("videos", []):
-                total += int(v.get("view_count", 0))
+                views    += int(v.get("view_count", 0))
+                comments += int(v.get("comment_count") or 0)
             has_more = bool(data.get("has_more", False))
             cursor   = int(data.get("cursor", 0))
-        return total
+        return views, comments
