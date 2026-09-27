@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import threading
 
@@ -21,6 +22,17 @@ from .widget import SocialWidget
 
 _LOG_FILE = os.path.join(DIR, "social_widget.log")
 
+# Tokens travel in query strings, and requests quotes the whole URL in its
+# connection errors — so a provider's key would land in the log with every
+# network blip (it did: a VK service key and an Instagram token, dozens of
+# times). Every record is scrubbed on its way to the file.
+_SECRET_RE = re.compile(r"(access_token=)[^&\s'\"]+")
+
+
+class _ScrubbingFormatter(logging.Formatter):
+    def format(self, record):
+        return _SECRET_RE.sub(r"\1***", super().format(record))
+
 # Provider classes in the order they appear in the popup table.
 _PROVIDER_CLASSES = [TikTokProvider, YouTubeProvider, InstagramProvider,
                      TelegramProvider, VKProvider, VKVideoProvider,
@@ -28,12 +40,11 @@ _PROVIDER_CLASSES = [TikTokProvider, YouTubeProvider, InstagramProvider,
 
 
 def _setup_logging():
-    logging.basicConfig(
-        filename=_LOG_FILE,
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        encoding="utf-8",
-    )
+    fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
+    logging.basicConfig(filename=_LOG_FILE, level=logging.INFO, format=fmt,
+                        encoding="utf-8")
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(_ScrubbingFormatter(fmt))
     log = logging.getLogger("social")
 
     # Without these, an uncaught error in any thread silently kills the app.
