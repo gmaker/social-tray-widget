@@ -61,6 +61,9 @@ DEFAULTS: dict = {
             "color":             [164, 91, 214],
             "count_views":       True,
             "views_refresh_min": 15,   # paging over media is the expensive call
+            "doh":               "",   # "" = system DNS, then DNS-over-HTTPS
+                                       # when it refuses the name; "off";
+                                       # or your own resolver URL
         },
         "telegram": {
             "enabled":           False,
