@@ -37,11 +37,20 @@ Both totals are cached for `views_refresh_min` minutes: Instagram's rate limit i
 "4800 x impressions per 24h", so a quiet account has a small budget and this is
 the only part of a poll costing more than one call.
 
+Every request goes through one requests.Session built by doh.session(): some
+ISPs block graph.instagram.com at the DNS level (their resolver answers "no
+such name" while the servers stay reachable), and that session falls back to
+resolving the name over HTTPS when the system resolver refuses it — TLS is
+still verified against the real hostname. See doh.py.
+
 Config (settings.json -> providers.instagram):
     "setup_token":       dashboard token, adopted on first run and cleared
     "count_views":       default true; false keeps likes and comments but
                          skips the insights calls, leaving views at 0
     "views_refresh_min": default 15
+    "doh":               default "" — system DNS, then DNS-over-HTTPS
+                         (1.1.1.1 / 8.8.8.8) when it refuses the name;
+                         "off" never; or your own resolver URL(s)
 """
 
 from __future__ import annotations
@@ -49,9 +58,8 @@ from __future__ import annotations
 import logging
 import time
 
-import requests
-
 from .base import Metrics, Provider
+from .. import doh
 
 log = logging.getLogger("social.instagram")
 
@@ -100,6 +108,17 @@ class InstagramProvider(Provider):
     label         = "Instagram"
     default_color = (225, 48, 108)
 
+    def __init__(self, config: dict, tokens, on_config_change=None):
+        super().__init__(config, tokens, on_config_change)
+        # One session for the row: keep-alive across a walk, and the
+        # DNS-over-HTTPS fallback for resolvers that refuse graph.instagram.com.
+        try:
+            self._http = doh.session(self.config.get("doh", ""))
+        except ValueError as exc:
+            log.error("instagram: %s — using the default (system DNS, then "
+                      "DNS-over-HTTPS)", exc)
+            self._http = doh.session("")
+
     # ── auth ────────────────────────────────────────────────────────────────
     def ensure_auth(self) -> bool:
         if self.tokens.access_token:
@@ -136,7 +155,7 @@ class InstagramProvider(Provider):
             return False
 
         if not self._refresh(setup):
-            probe = requests.get(_ME, params={"fields": "username",
+            probe = self._http.get(_ME, params={"fields": "username",
                                               "access_token": setup}, timeout=20)
             if not probe.ok:
                 log.error("instagram: setup_token rejected, HTTP %s: %s",
@@ -151,7 +170,7 @@ class InstagramProvider(Provider):
 
     def _refresh(self, token: str = "") -> bool:
         try:
-            r = requests.get(_REFRESH, params={
+            r = self._http.get(_REFRESH, params={
                 "grant_type":   "ig_refresh_token",
                 "access_token": token or self.tokens.access_token,
             }, timeout=20)
@@ -177,7 +196,7 @@ class InstagramProvider(Provider):
         if not self.tokens.is_valid() and not self.ensure_auth():
             return Metrics(ok=False, error="not authorised")
 
-        r = requests.get(_ME, params={
+        r = self._http.get(_ME, params={
             "fields":       "username,followers_count,media_count",
             "access_token": self.tokens.access_token,
         }, timeout=20)
@@ -233,7 +252,7 @@ class InstagramProvider(Provider):
         params = {"fields": "id,like_count,comments_count", "limit": _PER_PAGE,
                   "access_token": self.tokens.access_token}
         while url:
-            r = requests.get(url, params=params, timeout=20)
+            r = self._http.get(url, params=params, timeout=20)
             if not r.ok:
                 log.error("instagram /me/media HTTP %s: %s",
                           r.status_code, r.text[:500])
@@ -249,7 +268,7 @@ class InstagramProvider(Provider):
         """Lifetime views for up to `_PER_READ` posts in one multi-read."""
         if not ids:
             return 0
-        r = requests.get(_INSIGHTS, params={
+        r = self._http.get(_INSIGHTS, params={
             "ids":          ",".join(ids),
             "metric":       "views",
             "access_token": self.tokens.access_token,
@@ -265,7 +284,7 @@ class InstagramProvider(Provider):
         return sum(self._views_of_one(i) for i in ids)
 
     def _views_of_one(self, media_id: str) -> int:
-        r = requests.get(f"{_API}/{_VERSION}/{media_id}/insights", params={
+        r = self._http.get(f"{_API}/{_VERSION}/{media_id}/insights", params={
             "metric": "views", "access_token": self.tokens.access_token,
         }, timeout=20)
         if r.ok:

@@ -31,7 +31,8 @@
       "setup_token": "PASTE_A_DASHBOARD_TOKEN_HERE_ONCE",
       "color": [164, 91, 214],
       "count_views": true,
-      "views_refresh_min": 15
+      "views_refresh_min": 15,
+      "doh": ""
     },
     "telegram": {
       "enabled": false,

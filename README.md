@@ -92,6 +92,7 @@ Notes: the docs claim `video.get` needs a user token — in practice the service
 |---|---|
 | `Session key invalid … code 452` when exchanging the token | The token is **already long-lived**; this product has no short-lived stage and nothing to exchange. Just paste it into `setup_token` and let the widget adopt it. Don't call `ig_exchange_token`. |
 | `UserInvalidCredentials` at the dashboard login | The account has no native Instagram password because it signs in through Facebook. Set one: Accounts Center → Password and security. |
+| `Failed to resolve 'graph.instagram.com'` in the log while every other row works | Your ISP's DNS refuses the name (a block). The widget notices and resolves it over HTTPS by itself — one warning in the log, then business as usual. Set `doh` to `off` if you would rather it didn't. |
 | `OAuthException: your account's future activity history off Meta technologies is currently turned off` | Turn **off** "Disconnect future activity" in Accounts Center → Your activity off Meta technologies. Leave it off — it breaks token refresh too. |
 
 Posts made before the account switched to professional never report insights, so their views can't be counted — the widget detects them once and skips them afterwards.
@@ -148,6 +149,7 @@ Per platform, under `providers.<name>`:
 | `api_id` / `api_hash` | telegram | — | From my.telegram.org |
 | `channel` | telegram | — | `@username`, or `-100…` id for a private channel |
 | `proxy` | telegram | `""` | Empty = follow the Windows system proxy (for ISPs that block MTProto directly); `none` = force direct; or `socks5://host:port` |
+| `doh` | instagram | `""` | Empty = system DNS first, and when it refuses `graph.instagram.com` (ISP DNS block) resolve it over HTTPS at 1.1.1.1 / 8.8.8.8 — TLS still verified against the real name; `off` = never; or your own DNS-JSON resolver URL(s) |
 | `service_token` | vk, vkvideo, vkclips | — | Service key of any VK ID app; one key can serve all three rows |
 | `group` | vk, vkvideo, vkclips | — | Community screen name or numeric id (no minus) |
 | `count_views` | tiktok, instagram, telegram, vk, vkvideo, vkclips | `true` | Off = skip the views calls |
@@ -280,6 +282,7 @@ Bot API не отдаёт ни просмотры постов, ни реакц�
 |---|---|
 | `Session key invalid … code 452` при обмене токена | Токен **уже долгоживущий**; в этом продукте нет короткой стадии и менять нечего. Просто вставьте его в `setup_token`. `ig_exchange_token` вызывать не нужно. |
 | `UserInvalidCredentials` при логине в дашборде | У аккаунта нет собственного пароля Instagram, вход идёт через Facebook. Задайте пароль: Accounts Center → Пароль и безопасность. |
+| В логе `Failed to resolve 'graph.instagram.com'`, а остальные строки работают | DNS провайдера отвечает «нет такого имени» (блокировка). Виджет это замечает и сам резолвит имя через HTTPS — одно предупреждение в логе, дальше как обычно. Не хотите — `doh: "off"`. |
 | `OAuthException: your account's future activity history off Meta technologies is currently turned off` | Выключите «Disconnect future activity» в Accounts Center → Ваша активность вне технологий Meta. И не включайте обратно — это ломает и продление токена. |
 
 Посты, опубликованные до перехода аккаунта на профессиональный, статистику не отдают никогда, поэтому их просмотры не считаются — виджет определяет их один раз и дальше пропускает.
@@ -336,6 +339,7 @@ Bot API не отдаёт ни просмотры постов, ни реакц�
 | `api_id` / `api_hash` | telegram | — | С my.telegram.org |
 | `channel` | telegram | — | `@имя`, либо id `-100…` для приватного канала |
 | `proxy` | telegram | `""` | Пусто = системный прокси Windows (если провайдер режет MTProto напрямую); `none` = принудительно напрямую; либо `socks5://host:port` |
+| `doh` | instagram | `""` | Пусто = сначала системный DNS, а если он отвечает «нет такого имени» на `graph.instagram.com` (DNS-блокировка провайдера) — резолвить через HTTPS у 1.1.1.1 / 8.8.8.8, TLS по-прежнему проверяется по настоящему имени; `off` = никогда; либо свой DNS-JSON резолвер |
 | `service_token` | vk, vkvideo, vkclips | — | Сервисный ключ любого приложения VK ID; один ключ на все три строки |
 | `group` | vk, vkvideo, vkclips | — | Короткое имя сообщества или числовой id (без минуса) |
 | `count_views` | tiktok, instagram, telegram, vk, vkvideo, vkclips | `true` | Выкл = не запрашивать просмотры |
