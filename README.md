@@ -149,7 +149,7 @@ Per platform, under `providers.<name>`:
 | `api_id` / `api_hash` | telegram | — | From my.telegram.org |
 | `channel` | telegram | — | `@username`, or `-100…` id for a private channel |
 | `proxy` | telegram | `""` | Empty = follow the Windows system proxy (for ISPs that block MTProto directly); `none` = force direct; or `socks5://host:port` |
-| `doh` | instagram | `""` | Empty = system DNS first, and when it refuses `graph.instagram.com` (ISP DNS block) resolve it over HTTPS at 1.1.1.1 / 8.8.8.8 — TLS still verified against the real name; `off` = never; or your own DNS-JSON resolver URL(s) |
+| `doh` | tiktok, instagram | `""` | Empty = system DNS first, and when it cannot resolve the API hostname resolve it over HTTPS at 1.1.1.1 / 8.8.8.8 — TLS still verified against the real name; `off` = never; or your own DNS-JSON resolver URL(s) |
 | `service_token` | vk, vkvideo, vkclips | — | Service key of any VK ID app; one key can serve all three rows |
 | `group` | vk, vkvideo, vkclips | — | Community screen name or numeric id (no minus) |
 | `count_views` | tiktok, instagram, telegram, vk, vkvideo, vkclips | `true` | Off = skip the views calls |
@@ -339,7 +339,7 @@ Bot API не отдаёт ни просмотры постов, ни реакц�
 | `api_id` / `api_hash` | telegram | — | С my.telegram.org |
 | `channel` | telegram | — | `@имя`, либо id `-100…` для приватного канала |
 | `proxy` | telegram | `""` | Пусто = системный прокси Windows (если провайдер режет MTProto напрямую); `none` = принудительно напрямую; либо `socks5://host:port` |
-| `doh` | instagram | `""` | Пусто = сначала системный DNS, а если он отвечает «нет такого имени» на `graph.instagram.com` (DNS-блокировка провайдера) — резолвить через HTTPS у 1.1.1.1 / 8.8.8.8, TLS по-прежнему проверяется по настоящему имени; `off` = никогда; либо свой DNS-JSON резолвер |
+| `doh` | tiktok, instagram | `""` | Пусто = сначала системный DNS, а если он не может определить адрес API — резолвить через HTTPS у 1.1.1.1 / 8.8.8.8, TLS по-прежнему проверяется по настоящему имени; `off` = никогда; либо свой DNS-JSON резолвер |
 | `service_token` | vk, vkvideo, vkclips | — | Сервисный ключ любого приложения VK ID; один ключ на все три строки |
 | `group` | vk, vkvideo, vkclips | — | Короткое имя сообщества или числовой id (без минуса) |
 | `count_views` | tiktok, instagram, telegram, vk, vkvideo, vkclips | `true` | Выкл = не запрашивать просмотры |

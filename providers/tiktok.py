@@ -10,9 +10,8 @@ import random
 import string
 import urllib.parse
 
-import requests
-
 from .base import Metrics, Provider
+from .. import doh
 from ..oauth import LoopbackCapture
 
 log = logging.getLogger("social.tiktok")
@@ -28,6 +27,14 @@ class TikTokProvider(Provider):
     name          = "tiktok"
     label         = "TikTok"
     default_color = (254, 44, 85)
+
+    def __init__(self, config: dict, tokens, on_config_change=None):
+        super().__init__(config, tokens, on_config_change)
+        try:
+            self._http = doh.session(self.config.get("doh", ""))
+        except ValueError as exc:
+            log.error("tiktok: %s — using the default DNS fallback", exc)
+            self._http = doh.session("")
 
     def _client(self):
         return self.config.get("client_key", ""), self.config.get("client_secret", "")
@@ -48,7 +55,7 @@ class TikTokProvider(Provider):
             return False
         ck, cs = self._client()
         try:
-            r = requests.post(
+            r = self._http.post(
                 _TOKEN,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 data={"client_key": ck, "client_secret": cs,
@@ -87,7 +94,7 @@ class TikTokProvider(Provider):
             log.error("tiktok auth failed: %s", params)
             return False
         try:
-            r = requests.post(
+            r = self._http.post(
                 _TOKEN,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 data={"client_key": ck, "client_secret": cs,
@@ -111,7 +118,7 @@ class TikTokProvider(Provider):
             if not self._interactive_auth():
                 return Metrics(ok=False, error="not authorised")
 
-        r = requests.get(
+        r = self._http.get(
             _USERINFO,
             params={"fields": "display_name,follower_count,likes_count"},
             headers={"Authorization": f"Bearer {self.tokens.access_token}"},
@@ -134,7 +141,7 @@ class TikTokProvider(Provider):
         counters come from the same fields."""
         views, comments, cursor, has_more = 0, 0, 0, True
         while has_more:
-            r = requests.post(
+            r = self._http.post(
                 _VIDEOLIST,
                 params={"fields": "id,view_count,comment_count"},
                 headers={"Authorization": f"Bearer {self.tokens.access_token}",
