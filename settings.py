@@ -36,6 +36,7 @@ DEFAULTS: dict = {
             "client_key":    "",
             "client_secret": "",
             "redirect_uri":  "http://localhost:8080/callback",
+            "doh":           "",   # system DNS, then HTTPS fallback; "off" disables
             # TikTok's other brand colour. Its red is too close to YouTube's to
             # sit in the same table, and this is darkened from #25F4EE, which is
             # far too light to read on #141414.
